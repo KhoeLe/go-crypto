@@ -1,0 +1,33 @@
+binance:
+  base_url: "https://api.binance.com"
+  websocket_url: "wss://stream.binance.com:9443/ws"
+  timeout: 30
+  rate_limit: 1200
+
+symbols:
+  - "BTCUSDT"
+  - "ETHUSDT"
+  - "BNBUSDT"
+  - "ADAUSDT"
+  - "SOLUSDT"
+
+intervals:
+  - "15m"
+  - "4h"
+  - "1d"
+
+indicators:
+  rsi:
+    periods: [6, 12, 24]
+  ma:
+    periods: [7, 25, 99]
+    type: "SMA" # SMA, EMA, WMA
+  kdj:
+    k_period: 9
+    d_period: 3
+    j_period: 3
+
+logging:
+  level: "info"
+  format: "json"
+  output: "stdout"
