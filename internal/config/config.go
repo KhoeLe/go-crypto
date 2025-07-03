@@ -68,6 +68,7 @@ func DefaultConfig() *Config {
 			string(models.BTCUSDT),
 			string(models.ETHUSDT),
 			string(models.BNBUSDT),
+			string(models.ETHFIUSDT),
 		},
 		Intervals: []string{
 			string(models.Timeframe15m),

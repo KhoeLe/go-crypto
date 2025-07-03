@@ -1,0 +1,46 @@
+# Ultra-Cheap Serverless Lambda Configuration
+# Optimized for AWS Lambda + API Gateway deployment
+
+binance:
+  base_url: "https://api.binance.com"
+  websocket_url: "wss://stream.binance.com:9443"
+  rate_limit: 1200 # requests per minute
+
+symbols:
+  - "BTCUSDT"
+  - "ETHUSDT"
+  - "BNBUSDT"
+  - "ADAUSDT"
+  - "DOTUSDT"
+
+intervals:
+  - "15m"
+  - "4h"
+  - "1d"
+
+indicators:
+  rsi:
+    periods: [6, 12, 24]
+  ma:
+    periods: [7, 25, 99]
+  kdj:
+    k_period: 9
+    d_period: 3
+    j_period: 3
+
+logging:
+  level: "info"
+  format: "json"
+
+# Lambda-specific optimizations
+lambda:
+  memory_size: 128 # MB - cheapest option
+  timeout: 30 # seconds
+  cold_start_optimization: true
+
+# API Gateway settings
+api_gateway:
+  cors_enabled: true
+  throttling:
+    burst_limit: 5000
+    rate_limit: 2000

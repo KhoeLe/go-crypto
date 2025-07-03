@@ -103,3 +103,54 @@ setup: ## Setup development environment
 	go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
 
 all: clean deps test build ## Run all: clean, deps, test, build
+
+# Lambda deployment targets
+LAMBDA_FUNCTION_NAME=go-crypto-api-sg
+AWS_REGION=ap-southeast-1
+LAMBDA_BINARY=go-crypto-lambda
+LAMBDA_ZIP=lambda.zip
+
+build-lambda: deps ## Build Lambda function for AWS
+	@echo "Building Lambda function for AWS..."
+	mkdir -p $(BUILD_DIR)
+	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags="-s -w" -o $(BUILD_DIR)/$(LAMBDA_BINARY) cmd/lambda/main.go
+	# Create bootstrap file for Lambda custom runtime
+	cp $(BUILD_DIR)/$(LAMBDA_BINARY) $(BUILD_DIR)/bootstrap
+
+package-lambda: build-lambda ## Package Lambda function for deployment
+	@echo "Packaging Lambda function..."
+	cd $(BUILD_DIR) && zip $(LAMBDA_ZIP) bootstrap
+
+deploy-lambda: package-lambda ## Deploy Lambda function to AWS
+	@echo "Deploying Lambda function to AWS..."
+	./scripts/aws-deploy.sh
+
+quick-deploy: package-lambda ## Quick deploy to existing Lambda function
+	@echo "Quick deploying to existing Lambda function..."
+	./scripts/quick-deploy.sh
+
+lambda-test-endpoints: ## Test all Lambda endpoints
+	@echo "Testing Lambda endpoints..."
+	./scripts/test-lambda.sh all
+
+lambda-logs: ## View Lambda function logs
+	@echo "Viewing Lambda logs..."
+	aws logs tail /aws/lambda/$(LAMBDA_FUNCTION_NAME) --follow --region $(AWS_REGION)
+
+lambda-invoke: package-lambda ## Invoke Lambda function directly
+	@echo "Invoking Lambda function..."
+	aws lambda invoke \
+		--function-name $(LAMBDA_FUNCTION_NAME) \
+		--payload '{"httpMethod":"GET","path":"/health"}' \
+		--region $(AWS_REGION) \
+		response.json
+	@cat response.json
+	@rm -f response.json
+
+lambda-stats: ## Get Lambda function usage statistics
+	@echo "Getting Lambda function usage statistics..."
+	./scripts/lambda-stats.sh $(LAMBDA_FUNCTION_NAME) $(AWS_REGION)
+
+lambda-stats-week: ## Get Lambda function usage statistics for the past 7 days
+	@echo "Getting Lambda function usage statistics for the past 7 days..."
+	./scripts/lambda-stats.sh $(LAMBDA_FUNCTION_NAME) $(AWS_REGION) 7

@@ -19,6 +19,37 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+// BinanceError represents an error response from Binance API
+type BinanceError struct {
+	Code int    `json:"code"`
+	Msg  string `json:"msg"`
+}
+
+// Error implements the error interface
+func (e *BinanceError) Error() string {
+	return fmt.Sprintf("Binance API error %d: %s", e.Code, e.Msg)
+}
+
+// IsInvalidSymbol checks if the error is related to invalid symbol
+func (e *BinanceError) IsInvalidSymbol() bool {
+	return e.Code == -1121 || strings.Contains(strings.ToLower(e.Msg), "invalid symbol")
+}
+
+// parseBinanceError attempts to parse a Binance API error from response body
+func parseBinanceError(body []byte) *BinanceError {
+	var binanceErr BinanceError
+	if err := json.Unmarshal(body, &binanceErr); err != nil {
+		return nil
+	}
+	return &binanceErr
+}
+
+// nowGMT7 returns the current time in GMT+7 (Asia/Bangkok) timezone
+func nowGMT7() time.Time {
+	loc, _ := time.LoadLocation("Asia/Bangkok")
+	return time.Now().In(loc)
+}
+
 // Client represents Binance API client
 type Client struct {
 	config     *config.BinanceConfig
@@ -65,6 +96,9 @@ func (c *Client) GetKlines(ctx context.Context, symbol models.Symbol, interval m
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		if binanceErr := parseBinanceError(body); binanceErr != nil {
+			return nil, binanceErr
+		}
 		return nil, fmt.Errorf("API error: %s", string(body))
 	}
 
@@ -117,6 +151,9 @@ func (c *Client) GetTicker24hr(ctx context.Context, symbol models.Symbol) (*mode
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		if binanceErr := parseBinanceError(body); binanceErr != nil {
+			return nil, binanceErr
+		}
 		return nil, fmt.Errorf("API error: %s", string(body))
 	}
 
@@ -276,6 +313,6 @@ func (c *Client) parseTicker(raw models.BinanceTickerResponse, symbol models.Sym
 		PriceChangePercent: priceChangePercent,
 		Volume:             volume,
 		QuoteVolume:        quoteVolume,
-		Timestamp:          time.Now(),
+		Timestamp:          nowGMT7(),
 	}, nil
 }

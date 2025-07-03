@@ -15,8 +15,8 @@ RUN go mod download
 # Copy source code
 COPY . .
 
-# Build the application
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o main cmd/main.go
+# Build the API server application for production
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o main cmd/api/main.go
 
 # Final stage
 FROM alpine:latest
@@ -39,5 +39,5 @@ USER appuser
 # Expose port (if needed for future web interface)
 EXPOSE 8080
 
-# Run the application
-CMD ["./main"]
+# Run the application with production config
+CMD ["./main", "-port=8080", "-config=configs/production.yaml"]

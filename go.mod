@@ -3,6 +3,7 @@ module go-crypto
 go 1.21
 
 require (
+	github.com/aws/aws-lambda-go v1.49.0
 	github.com/gorilla/mux v1.8.0
 	github.com/gorilla/websocket v1.5.1
 	github.com/shopspring/decimal v1.3.1

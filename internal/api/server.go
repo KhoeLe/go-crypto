@@ -20,6 +20,12 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+// nowGMT7 returns the current time in GMT+7 (Asia/Bangkok) timezone
+func nowGMT7() time.Time {
+	loc, _ := time.LoadLocation("Asia/Bangkok")
+	return time.Now().In(loc)
+}
+
 // Server represents the API server
 type Server struct {
 	router        *mux.Router
@@ -59,6 +65,9 @@ func (s *Server) setupRoutes() {
 
 	// Multi-timeframe analysis
 	api.HandleFunc("/multi-analysis/{symbol}", s.handleGetMultiAnalysis).Methods("GET")
+
+	// Enhanced analysis endpoint with new features
+	api.HandleFunc("/enhanced-analysis/{symbol}", s.handleGetEnhancedAnalysis).Methods("GET")
 
 	// Real-time endpoints
 	api.HandleFunc("/stream/{symbol}", s.handleStreamInfo).Methods("GET")
@@ -100,15 +109,17 @@ type IndicatorsResponse struct {
 }
 
 type AnalysisResponse struct {
-	Symbol     string                     `json:"symbol"`
-	Timeframe  string                     `json:"timeframe"`
-	Price      *models.TickerPrice        `json:"price"`
-	RSI        map[string]decimal.Decimal `json:"rsi"`
-	MA         map[string]decimal.Decimal `json:"ma"`
-	KDJ        models.KDJIndicator        `json:"kdj"`
-	Volatility decimal.Decimal            `json:"volatility"`
-	Signals    []string                   `json:"signals"`
-	Timestamp  time.Time                  `json:"timestamp"`
+	Symbol          string                     `json:"symbol"`
+	Timeframe       string                     `json:"timeframe"`
+	Price           *models.TickerPrice        `json:"price"`
+	RSI             map[string]decimal.Decimal `json:"rsi"`
+	MA              map[string]decimal.Decimal `json:"ma"`
+	KDJ             models.KDJIndicator        `json:"kdj"`
+	MACD            models.MACDIndicator       `json:"macd"`
+	Volatility      decimal.Decimal            `json:"volatility"`
+	MarketSentiment string                     `json:"market_sentiment"`
+	Signals         []string                   `json:"signals"`
+	Timestamp       time.Time                  `json:"timestamp"`
 }
 
 type MultiAnalysisResponse struct {
@@ -128,6 +139,14 @@ type MultiAnalysisSummary struct {
 }
 */
 
+// isBinanceInvalidSymbolError checks if error is a Binance invalid symbol error
+func isBinanceInvalidSymbolError(err error) bool {
+	if binanceErr, ok := err.(*binance.BinanceError); ok {
+		return binanceErr.IsInvalidSymbol()
+	}
+	return false
+}
+
 // Handler functions
 func (s *Server) handleGetPrice(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
@@ -143,6 +162,10 @@ func (s *Server) handleGetPrice(w http.ResponseWriter, r *http.Request) {
 
 	ticker, err := s.binanceClient.GetTicker24hr(ctx, symbol)
 	if err != nil {
+		if isBinanceInvalidSymbolError(err) {
+			s.sendError(w, http.StatusBadRequest, fmt.Sprintf("Invalid symbol: %s. Please check the symbol name.", string(symbol)))
+			return
+		}
 		s.logger.WithError(err).Error("Failed to fetch ticker")
 		s.sendError(w, http.StatusInternalServerError, "Failed to fetch price data")
 		return
@@ -190,7 +213,7 @@ func (s *Server) handleGetKlines(w http.ResponseWriter, r *http.Request) {
 	}
 
 	limitStr := r.URL.Query().Get("limit")
-	limit := 100
+	limit := 50
 	if limitStr != "" {
 		if l, err := strconv.Atoi(limitStr); err == nil {
 			limit = l
@@ -244,7 +267,7 @@ func (s *Server) handleGetIndicators(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	// Fetch klines data
-	klines, err := s.binanceClient.GetKlines(ctx, symbol, models.Timeframe(interval), 100)
+	klines, err := s.binanceClient.GetKlines(ctx, symbol, models.Timeframe(interval), 25)
 	if err != nil {
 		s.logger.WithError(err).Error("Failed to fetch klines")
 		s.sendError(w, http.StatusInternalServerError, "Failed to fetch market data")
@@ -287,7 +310,7 @@ func (s *Server) handleGetIndicators(w http.ResponseWriter, r *http.Request) {
 		RSI:       rsiValues,
 		MA:        maValues,
 		KDJ:       kdj,
-		Timestamp: time.Now(),
+		Timestamp: nowGMT7(),
 	}
 
 	s.sendSuccess(w, response)
@@ -350,19 +373,78 @@ func (s *Server) handleGetMultiAnalysis(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	// Default timeframes if none specified or invalid
+	// Default timeframes - focus on 15m as requested
 	if len(timeframes) == 0 {
 		timeframes = []models.Timeframe{
-			models.Timeframe15m,
+			models.Timeframe15m, // Primary focus as requested
 			models.Timeframe4h,
 			models.Timeframe1d,
 		}
 	}
 
+	// Check if enhanced analysis is requested (query parameter)
+	enhancedParam := r.URL.Query().Get("enhanced")
+	useEnhanced := enhancedParam == "true" || enhancedParam == "1"
+
 	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
 	defer cancel()
 
-	// Process timeframes concurrently for better performance
+	if useEnhanced {
+		// Mixed analysis: enhanced for 15m, standard for others
+		type mixedResult struct {
+			timeframe string
+			analysis  interface{} // Can be either EnhancedAnalysisResponse or AnalysisResponse
+			err       error
+		}
+
+		mixedResultChan := make(chan mixedResult, len(timeframes))
+
+		// Launch goroutines for mixed analysis
+		for _, tf := range timeframes {
+			go func(timeframe models.Timeframe) {
+				if string(timeframe) == "15m" {
+					// Enhanced analysis for 15m timeframe
+					analysis, err := s.getEnhancedSymbolAnalysis(ctx, symbol, timeframe)
+					mixedResultChan <- mixedResult{
+						timeframe: string(timeframe),
+						analysis:  analysis,
+						err:       err,
+					}
+				} else {
+					// Standard analysis for 4h and 1d timeframes
+					analysis, err := s.getSymbolAnalysis(ctx, symbol, timeframe)
+					mixedResultChan <- mixedResult{
+						timeframe: string(timeframe),
+						analysis:  analysis,
+						err:       err,
+					}
+				}
+			}(tf)
+		}
+
+		// Collect mixed results
+		mixedAnalyses := make(map[string]interface{})
+		for i := 0; i < len(timeframes); i++ {
+			res := <-mixedResultChan
+			if res.err != nil {
+				s.logger.WithError(res.err).WithField("timeframe", res.timeframe).Warn("Failed to get analysis for timeframe")
+				continue
+			}
+			mixedAnalyses[res.timeframe] = res.analysis
+		}
+
+		response := map[string]interface{}{
+			"symbol":     string(symbol),
+			"timeframes": mixedAnalyses,
+			"timestamp":  nowGMT7(),
+			"enhanced":   true,
+		}
+
+		s.sendSuccess(w, response)
+		return
+	}
+
+	// Standard analysis (existing behavior)
 	type result struct {
 		timeframe string
 		analysis  *AnalysisResponse
@@ -400,7 +482,7 @@ func (s *Server) handleGetMultiAnalysis(w http.ResponseWriter, r *http.Request) 
 	response := MultiAnalysisResponse{
 		Symbol:     string(symbol),
 		Timeframes: analyses,
-		Timestamp:  time.Now(),
+		Timestamp:  nowGMT7(),
 	}
 
 	s.sendSuccess(w, response)
@@ -429,14 +511,14 @@ func (s *Server) handleGetSignals(w http.ResponseWriter, r *http.Request) {
 	s.sendSuccess(w, map[string]interface{}{
 		"symbol":    string(symbol),
 		"signals":   analysis.Signals,
-		"timestamp": time.Now(),
+		"timestamp": nowGMT7(),
 	})
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	s.sendSuccess(w, map[string]interface{}{
 		"status":    "healthy",
-		"timestamp": time.Now(),
+		"timestamp": nowGMT7(),
 		"version":   "1.0.0", // Changed version to test hot reload
 	})
 }
@@ -449,7 +531,7 @@ func (s *Server) handleGetSymbols(w http.ResponseWriter, r *http.Request) {
 	s.sendSuccess(w, map[string]interface{}{
 		"symbols":   s.config.Symbols,
 		"intervals": s.config.Intervals,
-		"timestamp": time.Now(),
+		"timestamp": nowGMT7(),
 	})
 }
 
@@ -469,17 +551,70 @@ func (s *Server) handleStreamInfo(w http.ResponseWriter, r *http.Request) {
 		"stream_url": fmt.Sprintf("wss://stream.binance.com:9443/ws/%s@ticker", strings.ToLower(symbol)),
 		"kline_url":  fmt.Sprintf("wss://stream.binance.com:9443/ws/%s@kline_15m", strings.ToLower(symbol)),
 		"supported":  true,
-		"timestamp":  time.Now(),
+		"timestamp":  nowGMT7(),
 		"message":    "Use WebSocket clients to connect to the stream URLs above",
 	}
 
 	s.sendSuccess(w, info)
 }
 
+// handleGetEnhancedAnalysis handles enhanced analysis requests with new features
+func (s *Server) handleGetEnhancedAnalysis(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	symbol := models.Symbol(vars["symbol"])
+
+	// Parse query parameters
+	interval := r.URL.Query().Get("interval")
+	if interval == "" {
+		interval = "15m" // Default to 15m as requested
+	}
+
+	if !utils.ValidateSymbol(string(symbol)) {
+		s.sendError(w, http.StatusBadRequest, "Invalid symbol")
+		return
+	}
+
+	if !utils.ValidateTimeframe(interval) {
+		s.sendError(w, http.StatusBadRequest, "Invalid timeframe")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+
+	// Get enhanced analysis with all new features
+	analysis, err := s.getEnhancedSymbolAnalysis(ctx, symbol, models.Timeframe(interval))
+	if err != nil {
+		s.logger.WithError(err).Error("Failed to get enhanced analysis")
+		s.sendError(w, http.StatusInternalServerError, "Failed to perform enhanced analysis")
+		return
+	}
+
+	// Add metadata about the enhanced features
+	response := map[string]interface{}{
+		"success": true,
+		"data":    analysis,
+		"metadata": map[string]interface{}{
+			"features_included": []string{
+				"money_flow_analysis",
+				"volume_breakout_detection",
+				"historical_indicators", "klines_data",
+				"enhanced_signals",
+			},
+			"klines_limit": 25,
+			"timeframe":    interval,
+			"enhanced":     true,
+		},
+		"timestamp": nowGMT7(),
+	}
+
+	s.sendSuccess(w, response)
+}
+
 // Helper functions
 func (s *Server) getSymbolAnalysis(ctx context.Context, symbol models.Symbol, timeframe models.Timeframe) (*AnalysisResponse, error) {
 	// Fetch market data
-	klines, err := s.binanceClient.GetKlines(ctx, symbol, timeframe, 100)
+	klines, err := s.binanceClient.GetKlines(ctx, symbol, timeframe, 25)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch klines: %w", err)
 	}
@@ -519,22 +654,293 @@ func (s *Server) getSymbolAnalysis(ctx context.Context, symbol models.Symbol, ti
 
 	volatility, _ := s.calculator.CalculateVolatility(klines, 20)
 
+	// Calculate MACD (5, 10, 3 parameters work better with limited data)
+	macd, err := s.calculator.CalculateMACD(klines, 5, 10, 3)
+	if err != nil {
+		// Use zero values if MACD calculation fails
+		macd = models.MACDIndicator{}
+	}
+
+	// Generate market sentiment
+	marketSentiment := s.calculator.GenerateMarketSentiment(rsiValues, macd, kdj, ticker.PriceChangePercent)
+
 	// Generate signals
 	signals := s.generateSignals(ticker, rsiValues, maValues, kdj)
 
 	return &AnalysisResponse{
-		Symbol:     string(symbol),
-		Timeframe:  string(timeframe),
-		Price:      ticker,
-		RSI:        rsiValues,
-		MA:         maValues,
-		KDJ:        kdj,
-		Volatility: volatility,
-		Signals:    signals,
-		Timestamp:  time.Now(),
+		Symbol:          string(symbol),
+		Timeframe:       string(timeframe),
+		Price:           ticker,
+		RSI:             rsiValues,
+		MA:              maValues,
+		KDJ:             kdj,
+		MACD:            macd,
+		Volatility:      volatility,
+		MarketSentiment: marketSentiment,
+		Signals:         signals,
+		Timestamp:       nowGMT7(),
 	}, nil
 }
 
+// getEnhancedSymbolAnalysis performs enhanced analysis with new features
+func (s *Server) getEnhancedSymbolAnalysis(ctx context.Context, symbol models.Symbol, timeframe models.Timeframe) (*models.EnhancedAnalysisResponse, error) {
+	// Fetch market data with limit of 25
+	limit := 25
+	klines, err := s.binanceClient.GetKlines(ctx, symbol, timeframe, limit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch klines: %w", err)
+	}
+
+	ticker, err := s.binanceClient.GetTicker24hr(ctx, symbol)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch ticker: %w", err)
+	}
+
+	// Calculate traditional indicators
+	rsiValues := make(map[string]decimal.Decimal)
+	for _, period := range s.config.Indicators.RSI.Periods {
+		rsi, err := s.calculator.CalculateRSI(klines, period)
+		if err == nil {
+			rsiValues[fmt.Sprintf("RSI_%d", period)] = rsi
+		}
+	}
+
+	maValues := make(map[string]decimal.Decimal)
+	for _, period := range s.config.Indicators.MA.Periods {
+		var ma decimal.Decimal
+		switch s.config.Indicators.MA.Type {
+		case "EMA":
+			ma, err = s.calculator.CalculateEMA(klines, period)
+		default:
+			ma, err = s.calculator.CalculateSMA(klines, period)
+		}
+		if err == nil {
+			maValues[fmt.Sprintf("MA_%d", period)] = ma
+		}
+	}
+
+	kdj, err := s.calculator.CalculateKDJ(klines, s.config.Indicators.KDJ.KPeriod, s.config.Indicators.KDJ.DPeriod, s.config.Indicators.KDJ.JPeriod)
+	if err != nil {
+		return nil, fmt.Errorf("failed to calculate KDJ: %w", err)
+	}
+
+	volatility, _ := s.calculator.CalculateVolatility(klines, 20)
+
+	// Calculate MACD (5, 10, 3 parameters work better with limited data)
+	macd, err := s.calculator.CalculateMACD(klines, 5, 10, 3)
+	if err != nil {
+		// Use zero values if MACD calculation fails
+		macd = models.MACDIndicator{}
+	}
+
+	// Calculate enhanced features
+	// 1. Money Flow Analysis
+	moneyFlow, err := s.calculator.CalculateMoneyFlowIndex(klines, 14)
+	if err != nil {
+		s.logger.WithError(err).Warn("Failed to calculate money flow index")
+		moneyFlow = models.MoneyFlowIndicator{
+			MoneyFlowIndex: decimal.NewFromInt(50), // Neutral default
+			Timestamp:      klines[len(klines)-1].CloseTime,
+		}
+	}
+
+	// 2. Volume Breakout Detection
+	volumeBreakout, err := s.calculator.DetectVolumeBreakout(klines, 20)
+	if err != nil {
+		s.logger.WithError(err).Warn("Failed to detect volume breakout")
+		volumeBreakout = models.VolumeBreakout{
+			IsBreakout:        false,
+			BreakoutDirection: "neutral",
+			Timestamp:         klines[len(klines)-1].CloseTime,
+		}
+	}
+
+	// 3. Volume Delta Analysis (Buy vs Sell pressure)
+	volumeDelta, err := s.calculator.CalculateVolumeDelta(klines)
+	if err != nil {
+		s.logger.WithError(err).Warn("Failed to calculate volume delta")
+		volumeDelta = models.VolumeDelta{
+			BuyVolume:    decimal.Zero,
+			SellVolume:   decimal.Zero,
+			Delta:        decimal.Zero,
+			DeltaPercent: decimal.Zero,
+			Pressure:     "balanced",
+			Strength:     1,
+			Timestamp:    klines[len(klines)-1].CloseTime,
+		}
+	}
+
+	// 4. Whale Volume Spike Detection
+	whaleActivity, err := s.calculator.CalculateWhaleVolumeSpike(klines, ticker.Price)
+	if err != nil {
+		s.logger.WithError(err).Warn("Failed to calculate whale volume spike")
+		whaleActivity = models.WhaleVolumeSpike{
+			IsWhaleSpike:     false,
+			SpikeVolume:      decimal.Zero,
+			SpikeValueUSDT:   decimal.Zero,
+			ThresholdUSDT:    decimal.NewFromInt(100000),
+			VolumeMultiplier: decimal.NewFromInt(1),
+			Timestamp:        klines[len(klines)-1].CloseTime,
+		}
+	}
+
+	// 5. Historical Indicators (save history and calculate manually)
+	historical, err := s.calculator.CalculateHistoricalIndicators(klines, s.config.Indicators.RSI.Periods, s.config.Indicators.MA.Periods, s.config.Indicators.MA.Type, 10)
+	if err != nil {
+		s.logger.WithError(err).Warn("Failed to calculate historical indicators")
+		historical = models.HistoricalIndicators{
+			RSIHistory: []models.RSIHistoryPoint{},
+			MAHistory:  []models.MAHistoryPoint{},
+		}
+	}
+
+	// Generate market sentiment
+	marketSentiment := s.calculator.GenerateMarketSentiment(rsiValues, macd, kdj, ticker.PriceChangePercent)
+
+	// Generate enhanced signals including pump detection
+	signals := s.generateEnhancedSignals(ticker, rsiValues, maValues, kdj, moneyFlow, volumeBreakout, volumeDelta, whaleActivity)
+
+	return &models.EnhancedAnalysisResponse{
+		Symbol:          string(symbol),
+		Timeframe:       string(timeframe),
+		Price:           ticker,
+		Klines:          klines, // Include klines data as requested
+		RSI:             rsiValues,
+		MA:              maValues,
+		KDJ:             kdj,
+		MACD:            macd,
+		Volatility:      volatility,
+		MarketSentiment: marketSentiment,
+		MoneyFlow:       moneyFlow,
+		VolumeBreakout:  volumeBreakout,
+		VolumeDelta:     volumeDelta,   // New: Buy vs sell pressure analysis
+		WhaleActivity:   whaleActivity, // New: Whale volume spike detection
+		Historical:      historical,
+		Signals:         signals,
+		Timestamp:       nowGMT7(),
+	}, nil
+}
+
+// generateEnhancedSignals creates trading signals including new money flow, volume analysis, and pump detection
+func (s *Server) generateEnhancedSignals(ticker *models.TickerPrice, rsiValues map[string]decimal.Decimal, maValues map[string]decimal.Decimal, kdj models.KDJIndicator, moneyFlow models.MoneyFlowIndicator, volumeBreakout models.VolumeBreakout, volumeDelta models.VolumeDelta, whaleActivity models.WhaleVolumeSpike) []string {
+	var signals []string
+
+	// Traditional RSI signals
+	if rsi6, exists := rsiValues["RSI_6"]; exists {
+		if rsi6.LessThan(decimal.NewFromInt(30)) {
+			signals = append(signals, "RSI_6_OVERSOLD")
+		} else if rsi6.GreaterThan(decimal.NewFromInt(70)) {
+			signals = append(signals, "RSI_6_OVERBOUGHT")
+		}
+	}
+
+	if rsi12, exists := rsiValues["RSI_12"]; exists {
+		if rsi12.LessThan(decimal.NewFromInt(30)) {
+			signals = append(signals, "RSI_12_OVERSOLD")
+		} else if rsi12.GreaterThan(decimal.NewFromInt(70)) {
+			signals = append(signals, "RSI_12_OVERBOUGHT")
+		}
+	}
+
+	if rsi24, exists := rsiValues["RSI_24"]; exists {
+		if rsi24.LessThan(decimal.NewFromInt(35)) {
+			signals = append(signals, "RSI_24_OVERSOLD")
+		} else if rsi24.GreaterThan(decimal.NewFromInt(65)) {
+			signals = append(signals, "RSI_24_OVERBOUGHT")
+		}
+	}
+
+	// Moving Average signals
+	if ma7, exists := maValues["MA_7"]; exists {
+		if ticker.Price.GreaterThan(ma7) {
+			signals = append(signals, "PRICE_ABOVE_MA7")
+		} else {
+			signals = append(signals, "PRICE_BELOW_MA7")
+		}
+	}
+
+	if ma25, exists := maValues["MA_25"]; exists {
+		if ticker.Price.GreaterThan(ma25) {
+			signals = append(signals, "PRICE_ABOVE_MA25")
+		} else {
+			signals = append(signals, "PRICE_BELOW_MA25")
+		}
+	}
+
+	// KDJ signals
+	if kdj.K.GreaterThan(kdj.D) && kdj.K.LessThan(decimal.NewFromInt(20)) {
+		signals = append(signals, "KDJ_BULLISH_CROSSOVER")
+	} else if kdj.K.LessThan(kdj.D) && kdj.K.GreaterThan(decimal.NewFromInt(80)) {
+		signals = append(signals, "KDJ_BEARISH_CROSSOVER")
+	}
+
+	// Enhanced Money Flow signals
+	if moneyFlow.MoneyFlowIndex.LessThan(decimal.NewFromInt(20)) {
+		signals = append(signals, "MONEY_FLOW_OVERSOLD")
+	} else if moneyFlow.MoneyFlowIndex.GreaterThan(decimal.NewFromInt(80)) {
+		signals = append(signals, "MONEY_FLOW_OVERBOUGHT")
+	}
+
+	// Money flow change signals
+	if moneyFlow.MoneyFlowChange.GreaterThan(decimal.NewFromInt(10)) {
+		signals = append(signals, "MONEY_FLOW_INCREASING")
+	} else if moneyFlow.MoneyFlowChange.LessThan(decimal.NewFromInt(-10)) {
+		signals = append(signals, "MONEY_FLOW_DECREASING")
+	}
+
+	// Volume breakout signals
+	if volumeBreakout.IsBreakout {
+		signals = append(signals, "VOLUME_BREAKOUT_DETECTED")
+
+		if volumeBreakout.BreakoutDirection == "bullish" {
+			signals = append(signals, "VOLUME_BREAKOUT_BULLISH")
+		} else if volumeBreakout.BreakoutDirection == "bearish" {
+			signals = append(signals, "VOLUME_BREAKOUT_BEARISH")
+		}
+
+		// High strength breakout
+		if volumeBreakout.BreakoutStrength.GreaterThan(decimal.NewFromInt(7)) {
+			signals = append(signals, "STRONG_VOLUME_BREAKOUT")
+		}
+	}
+
+	// Volume multiplier signals
+	if volumeBreakout.VolumeMultiplier.GreaterThan(decimal.NewFromFloat(2.0)) {
+		signals = append(signals, "HIGH_VOLUME_ACTIVITY")
+	} else if volumeBreakout.VolumeMultiplier.LessThan(decimal.NewFromFloat(0.5)) {
+		signals = append(signals, "LOW_VOLUME_ACTIVITY")
+	}
+
+	// Volume Delta signals (Buy vs Sell pressure)
+	if volumeDelta.Pressure == "buy_pressure" {
+		signals = append(signals, "BUY_PRESSURE_DETECTED")
+		if volumeDelta.Strength >= 7 {
+			signals = append(signals, "STRONG_BUY_PRESSURE")
+		}
+	} else if volumeDelta.Pressure == "sell_pressure" {
+		signals = append(signals, "SELL_PRESSURE_DETECTED")
+		if volumeDelta.Strength >= 7 {
+			signals = append(signals, "STRONG_SELL_PRESSURE")
+		}
+	}
+
+	// Whale Activity signals
+	if whaleActivity.IsWhaleSpike {
+		signals = append(signals, "WHALE_ACTIVITY_DETECTED")
+		if whaleActivity.SpikeValueUSDT.GreaterThan(decimal.NewFromInt(500000)) {
+			signals = append(signals, "LARGE_WHALE_ACTIVITY")
+		}
+	}
+
+	// Pump Signal Detection (combining multiple indicators)
+	if s.calculator.DetectPumpSignal(rsiValues, moneyFlow, volumeDelta, volumeBreakout) {
+		signals = append(signals, "PUMP_SIGNAL_DETECTED")
+	}
+
+	return signals
+}
+
+// generateSignals creates basic trading signals (traditional method)
 func (s *Server) generateSignals(ticker *models.TickerPrice, rsiValues map[string]decimal.Decimal, maValues map[string]decimal.Decimal, kdj models.KDJIndicator) []string {
 	var signals []string
 
@@ -562,6 +968,14 @@ func (s *Server) generateSignals(ticker *models.TickerPrice, rsiValues map[strin
 			signals = append(signals, "PRICE_ABOVE_MA7")
 		} else {
 			signals = append(signals, "PRICE_BELOW_MA7")
+		}
+	}
+
+	if ma25, exists := maValues["MA_25"]; exists {
+		if ticker.Price.GreaterThan(ma25) {
+			signals = append(signals, "PRICE_ABOVE_MA25")
+		} else {
+			signals = append(signals, "PRICE_BELOW_MA25")
 		}
 	}
 
@@ -780,4 +1194,191 @@ func abs(x int) int {
 func (s *Server) Start(port string) error {
 	s.logger.WithField("port", port).Info("Starting API server")
 	return http.ListenAndServe(":"+port, s.router)
+}
+
+// Public wrapper methods for Lambda handlers
+
+// GetPrice fetches real price data for a symbol
+func (s *Server) GetPrice(ctx context.Context, symbol string) (*PriceResponse, error) {
+	if !utils.ValidateSymbol(symbol) {
+		return nil, fmt.Errorf("invalid symbol: %s", symbol)
+	}
+
+	timeoutCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	ticker, err := s.binanceClient.GetTicker24hr(timeoutCtx, models.Symbol(symbol))
+	if err != nil {
+		s.logger.WithError(err).Error("Failed to fetch ticker")
+		return nil, fmt.Errorf("failed to fetch price data: %w", err)
+	}
+
+	response := &PriceResponse{
+		Symbol:    symbol,
+		Price:     ticker.Price,
+		Timestamp: ticker.Timestamp,
+	}
+
+	return response, nil
+}
+
+// GetAnalysis performs real technical analysis for a symbol and timeframe
+func (s *Server) GetAnalysis(ctx context.Context, symbol, interval string) (*AnalysisResponse, error) {
+	if !utils.ValidateSymbol(symbol) {
+		return nil, fmt.Errorf("invalid symbol: %s", symbol)
+	}
+
+	if !utils.ValidateTimeframe(interval) {
+		return nil, fmt.Errorf("invalid timeframe: %s", interval)
+	}
+
+	timeoutCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	// Get comprehensive analysis using existing method
+	analysis, err := s.getSymbolAnalysis(timeoutCtx, models.Symbol(symbol), models.Timeframe(interval))
+	if err != nil {
+		s.logger.WithError(err).Error("Failed to get analysis")
+		return nil, fmt.Errorf("failed to perform analysis: %w", err)
+	}
+
+	return analysis, nil
+}
+
+// GetMultiAnalysis performs multi-timeframe analysis for a symbol
+func (s *Server) GetMultiAnalysis(ctx context.Context, symbol string, timeframes []string) (*MultiAnalysisResponse, error) {
+	if !utils.ValidateSymbol(symbol) {
+		return nil, fmt.Errorf("invalid symbol: %s", symbol)
+	}
+
+	// Default timeframes if none provided
+	if len(timeframes) == 0 {
+		timeframes = []string{"15m", "4h", "1d"}
+	}
+
+	// Validate all timeframes
+	for _, tf := range timeframes {
+		if !utils.ValidateTimeframe(tf) {
+			return nil, fmt.Errorf("invalid timeframe: %s", tf)
+		}
+	}
+
+	timeoutCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+
+	// Perform analysis for each timeframe concurrently
+	type result struct {
+		timeframe string
+		analysis  *AnalysisResponse
+		err       error
+	}
+
+	resultChan := make(chan result, len(timeframes))
+
+	for _, tf := range timeframes {
+		go func(timeframe string) {
+			analysis, err := s.getSymbolAnalysis(timeoutCtx, models.Symbol(symbol), models.Timeframe(timeframe))
+			resultChan <- result{timeframe: timeframe, analysis: analysis, err: err}
+		}(tf)
+	}
+
+	// Collect results
+	analyses := make(map[string]AnalysisResponse)
+	for i := 0; i < len(timeframes); i++ {
+		res := <-resultChan
+		if res.err != nil {
+			s.logger.WithError(res.err).WithField("timeframe", res.timeframe).Error("Failed to get analysis for timeframe")
+			continue // Skip failed timeframes instead of failing entirely
+		}
+		analyses[res.timeframe] = *res.analysis
+	}
+
+	if len(analyses) == 0 {
+		return nil, fmt.Errorf("failed to get analysis for any timeframe")
+	}
+
+	response := &MultiAnalysisResponse{
+		Symbol:     symbol,
+		Timeframes: analyses,
+		Timestamp:  nowGMT7(),
+	}
+
+	return response, nil
+}
+
+// GetEnhancedMultiAnalysis performs multi-timeframe analysis with enhanced features for 15m and basic for others
+func (s *Server) GetEnhancedMultiAnalysis(ctx context.Context, symbol string, timeframes []string) (map[string]interface{}, error) {
+	if !utils.ValidateSymbol(symbol) {
+		return nil, fmt.Errorf("invalid symbol: %s", symbol)
+	}
+
+	// Default timeframes if none provided
+	if len(timeframes) == 0 {
+		timeframes = []string{"15m", "4h", "1d"}
+	}
+
+	// Validate all timeframes
+	for _, tf := range timeframes {
+		if !utils.ValidateTimeframe(tf) {
+			return nil, fmt.Errorf("invalid timeframe: %s", tf)
+		}
+	}
+
+	timeoutCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
+	defer cancel()
+
+	// Mixed analysis: enhanced for 15m, standard for others
+	type mixedResult struct {
+		timeframe string
+		analysis  interface{} // Can be either EnhancedAnalysisResponse or AnalysisResponse
+		err       error
+	}
+
+	mixedResultChan := make(chan mixedResult, len(timeframes))
+
+	// Launch goroutines for mixed analysis
+	for _, tf := range timeframes {
+		go func(timeframe string) {
+			if timeframe == "15m" {
+				// Enhanced analysis for 15m timeframe
+				analysis, err := s.getEnhancedSymbolAnalysis(timeoutCtx, models.Symbol(symbol), models.Timeframe(timeframe))
+				mixedResultChan <- mixedResult{
+					timeframe: timeframe,
+					analysis:  analysis,
+					err:       err,
+				}
+			} else {
+				// Standard analysis for 4h and 1d timeframes
+				analysis, err := s.getSymbolAnalysis(timeoutCtx, models.Symbol(symbol), models.Timeframe(timeframe))
+				mixedResultChan <- mixedResult{
+					timeframe: timeframe,
+					analysis:  analysis,
+					err:       err,
+				}
+			}
+		}(tf)
+	}
+
+	// Collect mixed results
+	mixedAnalyses := make(map[string]interface{})
+	for i := 0; i < len(timeframes); i++ {
+		res := <-mixedResultChan
+		if res.err != nil {
+			s.logger.WithError(res.err).WithField("timeframe", res.timeframe).Warn("Failed to get analysis for timeframe")
+			continue
+		}
+		mixedAnalyses[res.timeframe] = res.analysis
+	}
+
+	if len(mixedAnalyses) == 0 {
+		return nil, fmt.Errorf("failed to get analysis for any timeframe")
+	}
+
+	response := map[string]interface{}{
+		"symbol":     symbol,
+		"timeframes": mixedAnalyses,
+		"timestamp":  nowGMT7(),
+	}
+
+	return response, nil
 }

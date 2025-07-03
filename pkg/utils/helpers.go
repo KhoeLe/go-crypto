@@ -96,22 +96,30 @@ func RoundToSignificantFigures(d decimal.Decimal, figures int) decimal.Decimal {
 	return d
 }
 
-// ValidateSymbol validates if symbol is supported
+// ValidateSymbol validates if symbol follows a valid format
+// Let Binance API handle the actual symbol validation for better accuracy
 func ValidateSymbol(symbol string) bool {
-	supportedSymbols := map[string]bool{
-		"BTCUSDT":   true,
-		"ETHUSDT":   true,
-		"BNBUSDT":   true,
-		"ADAUSDT":   true,
-		"SOLUSDT":   true,
-		"DOTUSDT":   true,
-		"LINKUSDT":  true,
-		"AVAXUSDT":  true,
-		"MATICUSDT": true,
-		"ATOMUSDT":  true,
+	// Basic format validation
+	if len(symbol) < 6 || len(symbol) > 20 {
+		return false
 	}
-
-	return supportedSymbols[symbol]
+	
+	// Check if symbol contains only uppercase letters and numbers
+	for _, char := range symbol {
+		if !((char >= 'A' && char <= 'Z') || (char >= '0' && char <= '9')) {
+			return false
+		}
+	}
+	
+	// Must end with a valid quote currency (basic check)
+	validQuotes := []string{"USDT", "USDC", "BTC", "ETH", "BNB", "BUSD", "FDUSD"}
+	for _, quote := range validQuotes {
+		if len(symbol) > len(quote) && symbol[len(symbol)-len(quote):] == quote {
+			return true
+		}
+	}
+	
+	return false
 }
 
 // ValidateTimeframe validates if timeframe is supported
