@@ -1,7 +1,13 @@
 package main
 
 import (
+	"context"
 	"flag"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"go-crypto/internal/api"
 	"go-crypto/internal/config"
@@ -42,7 +48,7 @@ func main() {
 		logger.WithError(err).Fatal("Invalid configuration")
 	}
 
-	// Create and start server
+	// Create server
 	server := api.NewServer(cfg, logger)
 
 	logger.WithField("port", *portFlag).Info("Server starting")
@@ -57,8 +63,44 @@ func main() {
 	logger.Info("GET /api/v1/signals/{symbol} - Get trading signals")
 	logger.Info("GET /api/v1/symbols - Get supported symbols and intervals")
 	logger.Info("GET /api/v1/config - Get current configuration")
+	logger.Info("GET /api/v1/rate-limit-status - Get current rate limit status")
 
-	if err := server.Start(*portFlag); err != nil {
-		logger.WithError(err).Fatal("Failed to start server")
+	// Create HTTP server with timeouts
+	srv := &http.Server{
+		Addr:         ":" + *portFlag,
+		Handler:      server.GetHandler(),
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 15 * time.Second,
+		IdleTimeout:  60 * time.Second,
 	}
+
+	// Start server in a goroutine
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.WithError(err).Fatal("Failed to start server")
+		}
+	}()
+
+	// Set up graceful shutdown
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+
+	// Block until we receive a shutdown signal
+	<-stop
+
+	logger.Info("Shutting down server gracefully...")
+
+	// Create a deadline for graceful shutdown
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	// Attempt graceful shutdown
+	if err := srv.Shutdown(ctx); err != nil {
+		logger.WithError(err).Error("Server forced to shutdown")
+	}
+
+	// Cleanup resources
+	server.Stop()
+
+	logger.Info("Server shutdown complete")
 }

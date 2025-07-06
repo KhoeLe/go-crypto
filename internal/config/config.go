@@ -11,6 +11,7 @@ type Config struct {
 	Intervals  []string        `yaml:"intervals"`
 	Indicators IndicatorConfig `yaml:"indicators"`
 	Logging    LoggingConfig   `yaml:"logging"`
+	RateLimit  RateLimitConfig `yaml:"rate_limit"`
 }
 
 // BinanceConfig represents Binance API configuration
@@ -55,6 +56,24 @@ type LoggingConfig struct {
 	Output string `yaml:"output"`
 }
 
+// RateLimitConfig represents rate limiting configuration
+type RateLimitConfig struct {
+	Enabled         bool                     `yaml:"enabled"`
+	DefaultTier     string                   `yaml:"default_tier"`
+	Tiers           map[string]RateLimitTier `yaml:"tiers"`
+	IPWhitelist     []string                 `yaml:"ip_whitelist"`
+	IPBlacklist     []string                 `yaml:"ip_blacklist"`
+	CleanupInterval int                      `yaml:"cleanup_interval"` // minutes
+}
+
+// RateLimitTier represents a rate limiting tier with different limits
+type RateLimitTier struct {
+	RequestsPerMinute    int `yaml:"requests_per_minute"`
+	RequestsPerHour      int `yaml:"requests_per_hour"`
+	BurstAllowance       int `yaml:"burst_allowance"`
+	BlockDurationMinutes int `yaml:"block_duration_minutes"`
+}
+
 // DefaultConfig returns default configuration
 func DefaultConfig() *Config {
 	return &Config{
@@ -93,6 +112,39 @@ func DefaultConfig() *Config {
 			Level:  "info",
 			Format: "json",
 			Output: "stdout",
+		},
+		RateLimit: RateLimitConfig{
+			Enabled:         true,
+			DefaultTier:     "premium",
+			CleanupInterval: 60, // cleanup old entries every hour
+			IPWhitelist:     []string{},
+			IPBlacklist:     []string{},
+			Tiers: map[string]RateLimitTier{
+				"basic": {
+					RequestsPerMinute:    10,
+					RequestsPerHour:      200,
+					BurstAllowance:       5,
+					BlockDurationMinutes: 15,
+				},
+				"standard": {
+					RequestsPerMinute:    60,
+					RequestsPerHour:      1000,
+					BurstAllowance:       20,
+					BlockDurationMinutes: 5,
+				},
+				"premium": {
+					RequestsPerMinute:    300,
+					RequestsPerHour:      5000,
+					BurstAllowance:       50,
+					BlockDurationMinutes: 1,
+				},
+				"unlimited": {
+					RequestsPerMinute:    0, // 0 means unlimited
+					RequestsPerHour:      0,
+					BurstAllowance:       0,
+					BlockDurationMinutes: 0,
+				},
+			},
 		},
 	}
 }

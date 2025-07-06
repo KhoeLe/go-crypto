@@ -179,7 +179,7 @@ func analyzeSymbolTimeframe(ctx context.Context, client *binance.Client, calc *i
 		"kdj_d":            utils.FormatDecimal(indicators.KDJ.D, 2),
 		"kdj_j":            utils.FormatDecimal(indicators.KDJ.J, 2),
 		"volatility":       utils.FormatDecimal(volatility, 8),
-		"last_kline_time":  utils.FormatTimestamp(klines[len(klines)-1].CloseTime),
+		"last_kline_time":  utils.FormatGMTPlus7Timestamp(klines[len(klines)-1].CloseTime),
 		"klines_count":     len(klines),
 	}
 

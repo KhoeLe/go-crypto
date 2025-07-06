@@ -171,3 +171,17 @@ func GetTimeframeInSeconds(timeframe string) int64 {
 
 	return 3600 // Default to 1 hour
 }
+
+// FormatGMTPlus7Timestamp formats GMTPlus7Time for display
+func FormatGMTPlus7Timestamp(t interface{}) string {
+	switch v := t.(type) {
+	case time.Time:
+		return FormatTimestamp(v)
+	default:
+		// Try to access the Time field using reflection
+		if timeStruct, ok := t.(interface{ Format(string) string }); ok {
+			return timeStruct.Format("2006-01-02 15:04:05")
+		}
+		return "Invalid timestamp type"
+	}
+}

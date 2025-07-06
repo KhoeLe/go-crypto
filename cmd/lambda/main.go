@@ -10,6 +10,7 @@ import (
 
 	"go-crypto/internal/api"
 	"go-crypto/internal/config"
+	"go-crypto/internal/models"
 
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
@@ -35,7 +36,11 @@ func getCurrentTimestamp() string {
 		// Fallback to UTC+7 if timezone loading fails
 		loc = time.FixedZone("GMT+7", 7*60*60)
 	}
-	return time.Now().In(loc).Format(time.RFC3339)
+	// Create a GMTPlus7Time and let it handle the JSON formatting
+	gmt7Time := models.NewGMTPlus7Time(time.Now().In(loc))
+	// Remove the quotes that MarshalJSON adds
+	jsonTime, _ := gmt7Time.MarshalJSON()
+	return string(jsonTime[1 : len(jsonTime)-1]) // Remove surrounding quotes
 }
 
 // NewLambdaHandler creates a new Lambda handler
@@ -219,8 +224,13 @@ func (h *LambdaHandler) handleAnalysis(ctx context.Context, request events.APIGa
 		}, nil
 	}
 
-	// Return real data
-	jsonData, err := json.Marshal(analysis)
+	// Return real data with consistent API response structure
+	response := map[string]interface{}{
+		"success": true,
+		"data":    analysis,
+	}
+
+	jsonData, err := json.Marshal(response)
 	if err != nil {
 		return h.errorResponse(500, "Failed to serialize analysis data")
 	}
@@ -263,40 +273,10 @@ func (h *LambdaHandler) handleMultiAnalysis(ctx context.Context, request events.
 	multiAnalysis, err := h.server.GetEnhancedMultiAnalysis(ctx, symbol, timeframes)
 	if err != nil {
 		log.Printf("Failed to get enhanced multi-analysis: %v", err)
-		// Fall back to mock data if real API fails
-		body := fmt.Sprintf(`{
-			"symbol": "%s",
-			"timeframes": {
-				"15m": {
-					"symbol": "%s",
-					"timeframe": "15m",
-					"price": 45000.50,
-					"volume": 1234567,
-					"indicators": {
-						"sma7": 44900.25,
-						"sma25": 44800.75,
-						"rsi": 65.5,
-						"macd": 123.45
-					},
-					"signals": {
-						"trend": "bullish",
-						"strength": "moderate",
-						"recommendation": "buy"
-					}
-				}
-			},
-			"timestamp": "%s",
-			"source": "mock"
-		}`, symbol, symbol, getCurrentTimestamp())
-
-		return events.APIGatewayProxyResponse{
-			StatusCode: 200,
-			Body:       body,
-			Headers:    h.getCORSHeaders(),
-		}, nil
+		return h.errorResponse(500, "Failed to get multi-analysis data")
 	}
 
-	// Return real data
+	// Return real data without extra wrapper
 	jsonData, err := json.Marshal(multiAnalysis)
 	if err != nil {
 		return h.errorResponse(500, "Failed to serialize multi-analysis data")

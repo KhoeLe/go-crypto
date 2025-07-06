@@ -1,8 +1,6 @@
 package models
 
 import (
-	"time"
-
 	"github.com/shopspring/decimal"
 )
 
@@ -28,8 +26,8 @@ const (
 // Kline represents candlestick data
 type Kline struct {
 	Symbol              Symbol          `json:"symbol"`
-	OpenTime            time.Time       `json:"openTime"`
-	CloseTime           time.Time       `json:"closeTime"`
+	OpenTime            GMTPlus7Time    `json:"openTime"`
+	CloseTime           GMTPlus7Time    `json:"closeTime"`
 	Open                decimal.Decimal `json:"open"`
 	High                decimal.Decimal `json:"high"`
 	Low                 decimal.Decimal `json:"low"`
@@ -49,14 +47,14 @@ type TickerPrice struct {
 	PriceChangePercent decimal.Decimal `json:"priceChangePercent"`
 	Volume             decimal.Decimal `json:"volume"`
 	QuoteVolume        decimal.Decimal `json:"quoteVolume"`
-	Timestamp          time.Time       `json:"timestamp"`
+	Timestamp          GMTPlus7Time    `json:"timestamp"`
 }
 
 // TechnicalIndicators represents calculated technical indicators
 type TechnicalIndicators struct {
 	Symbol    Symbol                  `json:"symbol"`
 	Timeframe Timeframe               `json:"timeframe"`
-	Timestamp time.Time               `json:"timestamp"`
+	Timestamp GMTPlus7Time            `json:"timestamp"`
 	RSI       map[int]decimal.Decimal `json:"rsi"` // RSI values by period
 	MA        map[int]decimal.Decimal `json:"ma"`  // MA values by period
 	KDJ       KDJIndicator            `json:"kdj"`
@@ -84,7 +82,7 @@ type MarketData struct {
 	Price      TickerPrice         `json:"price"`
 	Klines     []Kline             `json:"klines"`
 	Indicators TechnicalIndicators `json:"indicators"`
-	UpdatedAt  time.Time           `json:"updatedAt"`
+	UpdatedAt  GMTPlus7Time        `json:"updatedAt"`
 }
 
 // WebSocketMessage represents WebSocket message structure
@@ -125,7 +123,10 @@ type MoneyFlowIndicator struct {
 	PositiveMoneyFlow decimal.Decimal `json:"positive_money_flow"` // Positive money flow
 	NegativeMoneyFlow decimal.Decimal `json:"negative_money_flow"` // Negative money flow
 	MoneyFlowChange   decimal.Decimal `json:"money_flow_change"`   // % change between periods
-	Timestamp         time.Time       `json:"timestamp"`
+	TypicalPrice      decimal.Decimal `json:"typical_price"`       // (High + Low + Close) / 3
+	RawMoneyFlow      decimal.Decimal `json:"raw_money_flow"`      // Typical Price × Volume
+	FlowType          string          `json:"type"`                // "positive" or "negative"
+	Timestamp         GMTPlus7Time    `json:"timestamp"`
 }
 
 // VolumeBreakout represents volume breakout analysis
@@ -136,7 +137,7 @@ type VolumeBreakout struct {
 	AverageVolume     decimal.Decimal `json:"average_volume"`     // Average volume over period
 	CurrentVolume     decimal.Decimal `json:"current_volume"`     // Current period volume
 	BreakoutDirection string          `json:"breakout_direction"` // "bullish" or "bearish"
-	Timestamp         time.Time       `json:"timestamp"`
+	Timestamp         GMTPlus7Time    `json:"timestamp"`
 }
 
 // VolumeDelta represents buy vs sell pressure analysis
@@ -147,7 +148,7 @@ type VolumeDelta struct {
 	DeltaPercent decimal.Decimal `json:"delta_percent"` // Delta as percentage of total volume
 	Pressure     string          `json:"pressure"`      // "buy_pressure", "sell_pressure", "balanced"
 	Strength     int             `json:"strength"`      // Pressure strength (1-10)
-	Timestamp    time.Time       `json:"timestamp"`
+	Timestamp    GMTPlus7Time    `json:"timestamp"`
 }
 
 // WhaleVolumeSpike represents large volume spike detection
@@ -157,22 +158,34 @@ type WhaleVolumeSpike struct {
 	SpikeValueUSDT   decimal.Decimal `json:"spike_value_usdt"`  // Value in USDT (volume * price)
 	ThresholdUSDT    decimal.Decimal `json:"threshold_usdt"`    // Threshold for whale detection (100k USDT)
 	VolumeMultiplier decimal.Decimal `json:"volume_multiplier"` // Current volume vs recent average
-	Timestamp        time.Time       `json:"timestamp"`
+	Timestamp        GMTPlus7Time    `json:"timestamp"`
 }
 
 // HistoricalIndicators represents historical tracking of indicators
 type HistoricalIndicators struct {
-	RSIHistory       []RSIHistoryPoint    `json:"rsi_history"`        // Historical RSI values
-	MAHistory        []MAHistoryPoint     `json:"ma_history"`         // Historical MA values
-	MoneyFlowHistory []MoneyFlowIndicator `json:"money_flow_history"` // Historical money flow
-	VolumeHistory    []VolumeBreakout     `json:"volume_history"`     // Historical volume analysis
+	RSIHistory        []RSIHistoryPoint    `json:"rsi_history"`        // Historical RSI values
+	MAHistory         []MAHistoryPoint     `json:"ma_history"`         // Historical MA values
+	MoneyFlowHistory  []MoneyFlowIndicator `json:"money_flow_history"` // Historical money flow
+	VolumeHistory     []VolumeBreakout     `json:"volume_history"`     // Historical volume analysis
+	DivergenceSignals []DivergenceSignal   `json:"divergence_signals"` // Divergence signals
+}
+
+// DivergenceSignal represents a detected divergence between price and indicator
+type DivergenceSignal struct {
+	Type        string         `json:"type"`        // "bullish" or "bearish"
+	PriceTrend  string         `json:"price_trend"` // "lower_lows" or "higher_highs"
+	RSITrend    string         `json:"rsi_trend"`   // "higher_lows" or "lower_highs"
+	MFITrend    string         `json:"mfi_trend"`   // "higher_lows" or "lower_highs"
+	Confirmed   bool           `json:"confirmed"`   // Whether divergence is confirmed
+	TimeRange   []GMTPlus7Time `json:"time_range"`  // Start and end time of divergence
+	Description string         `json:"description"` // Description of the divergence
 }
 
 // RSIHistoryPoint represents a single RSI calculation point
 type RSIHistoryPoint struct {
 	Period    int             `json:"period"`    // RSI period (6, 12, 24)
 	Value     decimal.Decimal `json:"value"`     // RSI value
-	Timestamp time.Time       `json:"timestamp"` // Calculation time
+	Timestamp GMTPlus7Time    `json:"timestamp"` // Calculation time
 }
 
 // MAHistoryPoint represents a single MA calculation point
@@ -180,7 +193,7 @@ type MAHistoryPoint struct {
 	Period    int             `json:"period"`    // MA period (7, 25, 99)
 	Type      string          `json:"type"`      // MA type (SMA, EMA)
 	Value     decimal.Decimal `json:"value"`     // MA value
-	Timestamp time.Time       `json:"timestamp"` // Calculation time
+	Timestamp GMTPlus7Time    `json:"timestamp"` // Calculation time
 }
 
 // EnhancedAnalysisResponse represents enhanced analysis with new features
@@ -201,5 +214,5 @@ type EnhancedAnalysisResponse struct {
 	WhaleActivity   WhaleVolumeSpike           `json:"whale_activity"`  // Whale volume spike detection
 	Historical      HistoricalIndicators       `json:"historical"`      // Historical data
 	Signals         []string                   `json:"signals"`
-	Timestamp       time.Time                  `json:"timestamp"`
+	Timestamp       GMTPlus7Time               `json:"timestamp"`
 }

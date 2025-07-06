@@ -45,9 +45,9 @@ func parseBinanceError(body []byte) *BinanceError {
 }
 
 // nowGMT7 returns the current time in GMT+7 (Asia/Bangkok) timezone
-func nowGMT7() time.Time {
+func nowGMT7() models.GMTPlus7Time {
 	loc, _ := time.LoadLocation("Asia/Bangkok")
-	return time.Now().In(loc)
+	return models.NewGMTPlus7Time(time.Now().In(loc))
 }
 
 // Client represents Binance API client
@@ -270,8 +270,8 @@ func (c *Client) parseKline(raw models.BinanceKlineResponse, symbol models.Symbo
 
 	return models.Kline{
 		Symbol:              symbol,
-		OpenTime:            openTime,
-		CloseTime:           closeTime,
+		OpenTime:            models.NewGMTPlus7Time(openTime),
+		CloseTime:           models.NewGMTPlus7Time(closeTime),
 		Open:                open,
 		High:                high,
 		Low:                 low,

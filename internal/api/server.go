@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"go-crypto/internal/config"
 	"go-crypto/internal/indicators"
 	"go-crypto/internal/models"
+	"go-crypto/internal/ratelimit"
 	"go-crypto/pkg/utils"
 
 	"github.com/gorilla/mux"
@@ -21,9 +23,9 @@ import (
 )
 
 // nowGMT7 returns the current time in GMT+7 (Asia/Bangkok) timezone
-func nowGMT7() time.Time {
+func nowGMT7() models.GMTPlus7Time {
 	loc, _ := time.LoadLocation("Asia/Bangkok")
-	return time.Now().In(loc)
+	return models.NewGMTPlus7Time(time.Now().In(loc))
 }
 
 // Server represents the API server
@@ -33,6 +35,7 @@ type Server struct {
 	calculator    *indicators.Calculator
 	config        *config.Config
 	logger        *logrus.Logger
+	rateLimiter   *ratelimit.RateLimiter
 }
 
 // NewServer creates a new API server
@@ -43,6 +46,7 @@ func NewServer(cfg *config.Config, logger *logrus.Logger) *Server {
 		calculator:    indicators.NewCalculator(),
 		config:        cfg,
 		logger:        logger,
+		rateLimiter:   ratelimit.NewRateLimiter(&cfg.RateLimit, logger),
 	}
 
 	s.setupRoutes()
@@ -76,9 +80,11 @@ func (s *Server) setupRoutes() {
 	api.HandleFunc("/health", s.handleHealth).Methods("GET")
 	api.HandleFunc("/config", s.handleGetConfig).Methods("GET")
 	api.HandleFunc("/symbols", s.handleGetSymbols).Methods("GET")
+	api.HandleFunc("/rate-limit-status", s.handleGetRateLimitStatus).Methods("GET")
 
 	// CORS middleware
 	s.router.Use(s.corsMiddleware)
+	s.router.Use(s.rateLimitMiddleware)
 	s.router.Use(s.loggingMiddleware)
 
 	// Serve static files (for future web interface)
@@ -94,9 +100,9 @@ type APIResponse struct {
 }
 
 type PriceResponse struct {
-	Symbol    string          `json:"symbol"`
-	Price     decimal.Decimal `json:"price"`
-	Timestamp time.Time       `json:"timestamp"`
+	Symbol    string              `json:"symbol"`
+	Price     decimal.Decimal     `json:"price"`
+	Timestamp models.GMTPlus7Time `json:"timestamp"`
 }
 
 type IndicatorsResponse struct {
@@ -105,7 +111,7 @@ type IndicatorsResponse struct {
 	RSI       map[string]decimal.Decimal `json:"rsi"`
 	MA        map[string]decimal.Decimal `json:"ma"`
 	KDJ       models.KDJIndicator        `json:"kdj"`
-	Timestamp time.Time                  `json:"timestamp"`
+	Timestamp models.GMTPlus7Time        `json:"timestamp"`
 }
 
 type AnalysisResponse struct {
@@ -119,13 +125,13 @@ type AnalysisResponse struct {
 	Volatility      decimal.Decimal            `json:"volatility"`
 	MarketSentiment string                     `json:"market_sentiment"`
 	Signals         []string                   `json:"signals"`
-	Timestamp       time.Time                  `json:"timestamp"`
+	Timestamp       models.GMTPlus7Time        `json:"timestamp"`
 }
 
 type MultiAnalysisResponse struct {
 	Symbol     string                      `json:"symbol"`
 	Timeframes map[string]AnalysisResponse `json:"timeframes"`
-	Timestamp  time.Time                   `json:"timestamp"`
+	Timestamp  models.GMTPlus7Time         `json:"timestamp"`
 }
 
 // MultiAnalysisSummary struct is commented out since summary generation is disabled
@@ -430,17 +436,74 @@ func (s *Server) handleGetMultiAnalysis(w http.ResponseWriter, r *http.Request) 
 				s.logger.WithError(res.err).WithField("timeframe", res.timeframe).Warn("Failed to get analysis for timeframe")
 				continue
 			}
+
+			// Sort klines in descending order and add proper timestamps for enhanced analysis
+			if enhancedAnalysis, ok := res.analysis.(*models.EnhancedAnalysisResponse); ok {
+				s.sortKlinesDescending(enhancedAnalysis.Klines)
+				enhancedAnalysis.Timestamp = nowGMT7()
+
+				// Debug the divergence signals
+				s.logger.WithFields(logrus.Fields{
+					"timeframe":               res.timeframe,
+					"divergenceSignalsLength": len(enhancedAnalysis.Historical.DivergenceSignals),
+					"rsiHistoryLength":        len(enhancedAnalysis.Historical.RSIHistory),
+					"moneyFlowHistoryLength":  len(enhancedAnalysis.Historical.MoneyFlowHistory),
+				}).Info("Enhanced analysis divergence signals debug")
+
+				// Debug the divergence signals further if they're empty
+				if len(enhancedAnalysis.Historical.DivergenceSignals) == 0 {
+					// Attempt to recalculate divergence signals if we have enough historical data
+					if len(enhancedAnalysis.Historical.RSIHistory) > 0 && len(enhancedAnalysis.Historical.MoneyFlowHistory) > 0 {
+						fmt.Printf("[DEBUG] Recalculating divergence signals in multi-analysis for timeframe %s\n", res.timeframe)
+						enhancedAnalysis.Historical.DivergenceSignals = s.calculator.DetectMoneyFlowDivergence(
+							enhancedAnalysis.Klines,
+							enhancedAnalysis.Historical.RSIHistory,
+							enhancedAnalysis.Historical.MoneyFlowHistory,
+						)
+						s.logger.WithField("recalculatedSignalsLength", len(enhancedAnalysis.Historical.DivergenceSignals)).Info("Recalculated divergence signals")
+
+						// If we found divergence signals, add them to the enhanced signals list
+						if len(enhancedAnalysis.Historical.DivergenceSignals) > 0 {
+							for _, divSignal := range enhancedAnalysis.Historical.DivergenceSignals {
+								var signalText string
+								if divSignal.Type == "bullish" {
+									signalText = "BULLISH_DIVERGENCE_DETECTED"
+								} else if divSignal.Type == "bearish" {
+									signalText = "BEARISH_DIVERGENCE_DETECTED"
+								} else if divSignal.Type == "partial" {
+									if divSignal.RSITrend == "higher_lows" || divSignal.MFITrend == "higher_lows" {
+										signalText = "PARTIAL_BULLISH_DIVERGENCE"
+									} else if divSignal.RSITrend == "lower_highs" || divSignal.MFITrend == "lower_highs" {
+										signalText = "PARTIAL_BEARISH_DIVERGENCE"
+									}
+								}
+
+								if signalText != "" && !containsSignal(enhancedAnalysis.Signals, signalText) {
+									enhancedAnalysis.Signals = append(enhancedAnalysis.Signals, signalText)
+								}
+							}
+						}
+					}
+				}
+			}
+
 			mixedAnalyses[res.timeframe] = res.analysis
+		}
+
+		if len(mixedAnalyses) == 0 {
+			s.sendError(w, http.StatusInternalServerError, "Failed to get analysis for any timeframe")
+			return
 		}
 
 		response := map[string]interface{}{
 			"symbol":     string(symbol),
 			"timeframes": mixedAnalyses,
 			"timestamp":  nowGMT7(),
-			"enhanced":   true,
 		}
 
-		s.sendSuccess(w, response)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(response)
 		return
 	}
 
@@ -590,25 +653,7 @@ func (s *Server) handleGetEnhancedAnalysis(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Add metadata about the enhanced features
-	response := map[string]interface{}{
-		"success": true,
-		"data":    analysis,
-		"metadata": map[string]interface{}{
-			"features_included": []string{
-				"money_flow_analysis",
-				"volume_breakout_detection",
-				"historical_indicators", "klines_data",
-				"enhanced_signals",
-			},
-			"klines_limit": 25,
-			"timeframe":    interval,
-			"enhanced":     true,
-		},
-		"timestamp": nowGMT7(),
-	}
-
-	s.sendSuccess(w, response)
+	s.sendSuccess(w, analysis)
 }
 
 // Helper functions
@@ -684,8 +729,8 @@ func (s *Server) getSymbolAnalysis(ctx context.Context, symbol models.Symbol, ti
 
 // getEnhancedSymbolAnalysis performs enhanced analysis with new features
 func (s *Server) getEnhancedSymbolAnalysis(ctx context.Context, symbol models.Symbol, timeframe models.Timeframe) (*models.EnhancedAnalysisResponse, error) {
-	// Fetch market data with limit of 25
-	limit := 25
+	// Fetch market data with limit of 50 for calculation, but only return 25 in response
+	limit := 50
 	klines, err := s.binanceClient.GetKlines(ctx, symbol, timeframe, limit)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch klines: %w", err)
@@ -784,14 +829,69 @@ func (s *Server) getEnhancedSymbolAnalysis(ctx context.Context, symbol models.Sy
 		}
 	}
 
-	// 5. Historical Indicators (save history and calculate manually)
-	historical, err := s.calculator.CalculateHistoricalIndicators(klines, s.config.Indicators.RSI.Periods, s.config.Indicators.MA.Periods, s.config.Indicators.MA.Type, 10)
+	// 5. Historical Indicators with precise counts
+	// RSI History: 5 entries, MA History: 5 entries, Money Flow History: 15 entries
+	const (
+		expectedRSIHistoryCount = 5
+		expectedMAHistoryCount  = 5
+		expectedMoneyFlowCount  = 15
+	)
+
+	rsiHistorical, err := s.calculator.CalculateHistoricalIndicators(klines, s.config.Indicators.RSI.Periods, []int{}, s.config.Indicators.MA.Type, expectedRSIHistoryCount)
 	if err != nil {
-		s.logger.WithError(err).Warn("Failed to calculate historical indicators")
-		historical = models.HistoricalIndicators{
+		s.logger.WithError(err).Warn("Failed to calculate RSI historical indicators")
+		rsiHistorical = models.HistoricalIndicators{
 			RSIHistory: []models.RSIHistoryPoint{},
 			MAHistory:  []models.MAHistoryPoint{},
 		}
+	}
+
+	// Debug the MA history count
+	s.logger.WithField("expectedMAHistoryCount", expectedMAHistoryCount).Info("Calculating MA history")
+
+	maHistorical, err := s.calculator.CalculateHistoricalIndicators(klines, []int{}, s.config.Indicators.MA.Periods, s.config.Indicators.MA.Type, expectedMAHistoryCount)
+	if err != nil {
+		s.logger.WithError(err).Warn("Failed to calculate MA historical indicators")
+		maHistorical = models.HistoricalIndicators{
+			RSIHistory: []models.RSIHistoryPoint{},
+			MAHistory:  []models.MAHistoryPoint{},
+		}
+	}
+
+	// Debug the actual MA history length
+	s.logger.WithField("actualMAHistoryLength", len(maHistorical.MAHistory)).Info("MA history calculated")
+
+	// Calculate Money Flow History
+	moneyFlowHistory, err := s.calculator.CalculateHistoricalMoneyFlow(klines, 14, expectedMoneyFlowCount)
+	if err != nil {
+		s.logger.WithError(err).Warn("Failed to calculate historical money flow")
+		moneyFlowHistory = []models.MoneyFlowIndicator{}
+	}
+
+	// Debug the money flow history
+	s.logger.WithField("moneyFlowHistoryLength", len(moneyFlowHistory)).Info("Money flow history calculated")
+	fmt.Printf("[DEBUG] Money Flow History length: %d, expected: %d\n", len(moneyFlowHistory), expectedMoneyFlowCount)
+
+	// Detect divergence signals between RSI and Money Flow
+	// Initialize with empty array to avoid null in JSON response
+	divergenceSignals := make([]models.DivergenceSignal, 0)
+
+	if len(rsiHistorical.RSIHistory) > 0 && len(moneyFlowHistory) > 0 {
+		// The calculator now returns properly formatted models.DivergenceSignal objects
+		divergenceSignals = s.calculator.DetectMoneyFlowDivergence(klines, rsiHistorical.RSIHistory, moneyFlowHistory)
+	}
+
+	// Ensure divergenceSignals is never null
+	if divergenceSignals == nil {
+		divergenceSignals = []models.DivergenceSignal{}
+	}
+
+	// Combine historical indicators
+	historical := models.HistoricalIndicators{
+		RSIHistory:        rsiHistorical.RSIHistory,
+		MAHistory:         maHistorical.MAHistory,
+		MoneyFlowHistory:  moneyFlowHistory,
+		DivergenceSignals: divergenceSignals,
 	}
 
 	// Generate market sentiment
@@ -800,11 +900,17 @@ func (s *Server) getEnhancedSymbolAnalysis(ctx context.Context, symbol models.Sy
 	// Generate enhanced signals including pump detection
 	signals := s.generateEnhancedSignals(ticker, rsiValues, maValues, kdj, moneyFlow, volumeBreakout, volumeDelta, whaleActivity)
 
+	// Return only the last 15 klines in the response (but use all 50 for calculations)
+	responseKlines := klines
+	if len(klines) > 15 {
+		responseKlines = klines[len(klines)-15:]
+	}
+
 	return &models.EnhancedAnalysisResponse{
 		Symbol:          string(symbol),
 		Timeframe:       string(timeframe),
 		Price:           ticker,
-		Klines:          klines, // Include klines data as requested
+		Klines:          responseKlines, // Only include last 25 klines in response
 		RSI:             rsiValues,
 		MA:              maValues,
 		KDJ:             kdj,
@@ -989,6 +1095,16 @@ func (s *Server) generateSignals(ticker *models.TickerPrice, rsiValues map[strin
 	return signals
 }
 
+// Helper to check if a signal is already in the list
+func containsSignal(signals []string, signal string) bool {
+	for _, s := range signals {
+		if s == signal {
+			return true
+		}
+	}
+	return false
+}
+
 // Middleware
 func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1015,6 +1131,73 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 			"duration": time.Since(start),
 			"ip":       r.RemoteAddr,
 		}).Info("API request")
+	})
+}
+
+func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Skip rate limiting for health checks and static files
+		if strings.HasPrefix(r.URL.Path, "/health") ||
+			strings.HasPrefix(r.URL.Path, "/static") ||
+			!strings.HasPrefix(r.URL.Path, "/api/") {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// Get client IP
+		clientIP := ratelimit.GetClientIP(r)
+
+		// Check rate limit
+		allowed, status := s.rateLimiter.IsAllowed(clientIP)
+
+		// Add rate limit headers to response
+		for key, value := range status.ToHeaders() {
+			w.Header().Set(key, value)
+		}
+
+		if !allowed {
+			// Log rate limit violation
+			s.logger.WithFields(logrus.Fields{
+				"ip":             clientIP,
+				"path":           r.URL.Path,
+				"method":         r.Method,
+				"tier":           status.Tier,
+				"remaining_min":  status.RemainingMinute,
+				"remaining_hour": status.RemainingHour,
+				"blocked_until":  status.BlockedUntil,
+			}).Warn("Rate limit exceeded")
+
+			// Return rate limit error
+			errorMessage := "Rate limit exceeded"
+			if !status.BlockedUntil.IsZero() {
+				errorMessage = fmt.Sprintf("Rate limit exceeded. Blocked until %s", status.BlockedUntil.Format(time.RFC3339))
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Retry-After", fmt.Sprintf("%.0f", time.Until(status.ResetTimeMinute).Seconds()))
+			w.WriteHeader(http.StatusTooManyRequests)
+
+			json.NewEncoder(w).Encode(APIResponse{
+				Success: false,
+				Error:   errorMessage,
+				Data: map[string]interface{}{
+					"rate_limit_status": status,
+					"retry_after":       time.Until(status.ResetTimeMinute).Seconds(),
+				},
+			})
+			return
+		}
+
+		// Log successful rate limit check (debug level)
+		s.logger.WithFields(logrus.Fields{
+			"ip":             clientIP,
+			"tier":           status.Tier,
+			"remaining_min":  status.RemainingMinute,
+			"remaining_hour": status.RemainingHour,
+			"request_count":  status.RequestCount,
+		}).Debug("Rate limit check passed")
+
+		next.ServeHTTP(w, r)
 	})
 }
 
@@ -1192,8 +1375,24 @@ func abs(x int) int {
 
 // Start starts the API server
 func (s *Server) Start(port string) error {
-	s.logger.WithField("port", port).Info("Starting API server")
-	return http.ListenAndServe(":"+port, s.router)
+	// Create HTTP server
+	srv := &http.Server{
+		Addr:         ":" + port,
+		Handler:      s.router,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 15 * time.Second,
+		IdleTimeout:  60 * time.Second,
+	}
+
+	// Return the server so it can be started
+	return srv.ListenAndServe()
+}
+
+// Stop gracefully stops the server and cleans up resources
+func (s *Server) Stop() {
+	if s.rateLimiter != nil {
+		s.rateLimiter.Stop()
+	}
 }
 
 // Public wrapper methods for Lambda handlers
@@ -1367,6 +1566,13 @@ func (s *Server) GetEnhancedMultiAnalysis(ctx context.Context, symbol string, ti
 			s.logger.WithError(res.err).WithField("timeframe", res.timeframe).Warn("Failed to get analysis for timeframe")
 			continue
 		}
+
+		// Sort klines in descending order and add proper timestamps for enhanced analysis
+		if enhancedAnalysis, ok := res.analysis.(*models.EnhancedAnalysisResponse); ok {
+			s.sortKlinesDescending(enhancedAnalysis.Klines)
+			enhancedAnalysis.Timestamp = nowGMT7()
+		}
+
 		mixedAnalyses[res.timeframe] = res.analysis
 	}
 
@@ -1381,4 +1587,68 @@ func (s *Server) GetEnhancedMultiAnalysis(ctx context.Context, symbol string, ti
 	}
 
 	return response, nil
+}
+
+// sortKlinesDescending sorts klines by close time in descending order (newest first)
+func (s *Server) sortKlinesDescending(klines []models.Kline) {
+	sort.Slice(klines, func(i, j int) bool {
+		return klines[i].CloseTime.Time.After(klines[j].CloseTime.Time)
+	})
+}
+
+// GetRateLimitStatus returns the current rate limit status for a client IP
+func (s *Server) GetRateLimitStatus(ip string) *ratelimit.RateLimitStatus {
+	_, status := s.rateLimiter.IsAllowed(ip)
+	return status
+}
+
+// GetHandler returns the router for server configuration
+func (s *Server) GetHandler() http.Handler {
+	return s.router
+}
+
+// handleGetRateLimitStatus handles rate limit status request for the current client
+func (s *Server) handleGetRateLimitStatus(w http.ResponseWriter, r *http.Request) {
+	// Get client IP
+	clientIP := ratelimit.GetClientIP(r)
+
+	// Get rate limit status for the client
+	_, status := s.rateLimiter.IsAllowed(clientIP)
+
+	// Add rate limit headers to response
+	for key, value := range status.ToHeaders() {
+		w.Header().Set(key, value)
+	}
+
+	// Get tier information
+	tierInfo := s.config.RateLimit.Tiers[status.Tier]
+
+	// Create response with tier details and client status
+	response := map[string]interface{}{
+		"ip":               clientIP,
+		"allowed":          status.Allowed,
+		"tier":             status.Tier,
+		"remaining_minute": status.RemainingMinute,
+		"remaining_hour":   status.RemainingHour,
+		"reset_minute":     status.ResetTimeMinute,
+		"reset_hour":       status.ResetTimeHour,
+		"request_count":    status.RequestCount,
+		"burst_tokens":     status.BurstTokens,
+		"tier_limits": map[string]interface{}{
+			"requests_per_minute":    tierInfo.RequestsPerMinute,
+			"requests_per_hour":      tierInfo.RequestsPerHour,
+			"burst_allowance":        tierInfo.BurstAllowance,
+			"block_duration_minutes": tierInfo.BlockDurationMinutes,
+		},
+		"rate_limit_enabled": s.config.RateLimit.Enabled,
+		"timestamp":          nowGMT7(),
+	}
+
+	// Add blocked status if applicable
+	if !status.BlockedUntil.IsZero() {
+		response["blocked_until"] = status.BlockedUntil
+		response["blocked"] = true
+	}
+
+	s.sendSuccess(w, response)
 }

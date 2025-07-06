@@ -3,6 +3,7 @@ package indicators
 import (
 	"fmt"
 	"math"
+	"sort"
 
 	"go-crypto/internal/models"
 
@@ -320,6 +321,31 @@ func (c *Calculator) CalculateMoneyFlowIndex(klines []models.Kline, period int) 
 		if !prevMfi.IsZero() {
 			moneyFlowChange = mfi.Sub(prevMfi).Div(prevMfi).Mul(decimal.NewFromInt(100))
 		}
+	} else if len(klines) >= period+5 {
+		// Fallback: compare current MFI with a shorter historical period when we don't have enough data for full period comparison
+		halfPeriod := period / 2
+		prevPositiveFlow, prevNegativeFlow := decimal.Zero, decimal.Zero
+		prevStartIdx := len(typicalPrices) - period - halfPeriod
+		if prevStartIdx < 0 {
+			prevStartIdx = 0
+		}
+
+		for i := prevStartIdx; i < prevStartIdx+halfPeriod-1 && i < len(typicalPrices)-period; i++ {
+			if typicalPrices[i+1].GreaterThan(typicalPrices[i]) {
+				prevPositiveFlow = prevPositiveFlow.Add(moneyFlows[i+1])
+			} else if typicalPrices[i+1].LessThan(typicalPrices[i]) {
+				prevNegativeFlow = prevNegativeFlow.Add(moneyFlows[i+1])
+			}
+		}
+
+		if !prevNegativeFlow.IsZero() {
+			prevMoneyFlowRatio := prevPositiveFlow.Div(prevNegativeFlow)
+			prevMfi := decimal.NewFromInt(100).Sub(decimal.NewFromInt(100).Div(decimal.NewFromInt(1).Add(prevMoneyFlowRatio)))
+
+			if !prevMfi.IsZero() {
+				moneyFlowChange = mfi.Sub(prevMfi).Div(prevMfi).Mul(decimal.NewFromInt(100))
+			}
+		}
 	}
 
 	return models.MoneyFlowIndicator{
@@ -408,9 +434,20 @@ func (c *Calculator) CalculateHistoricalIndicators(klines []models.Kline, rsiPer
 	var maHistory []models.MAHistoryPoint
 
 	// Calculate historical points by stepping through the data
-	step := max(1, len(klines)/historyLength)
+	// Ensure we get close to the desired history length by better step calculation
+	minRequiredForRSI := 25 // Minimum data points needed for RSI calculation
+	if len(klines) <= minRequiredForRSI {
+		historyLength = 1 // Only calculate current values
+	}
 
-	for i := step; i < len(klines); i += step {
+	step := max(1, (len(klines)-minRequiredForRSI)/max(1, historyLength-1))
+	if step == 0 {
+		step = 1
+	}
+
+	// Start from a reasonable point where we have enough data
+	startIdx := minRequiredForRSI
+	for i := startIdx; i < len(klines); i += step {
 		subKlines := klines[:i+1]
 		timestamp := klines[i].CloseTime
 
@@ -456,9 +493,209 @@ func (c *Calculator) CalculateHistoricalIndicators(klines []models.Kline, rsiPer
 	}
 
 	return models.HistoricalIndicators{
-		RSIHistory: rsiHistory,
-		MAHistory:  maHistory,
+		RSIHistory: limitRSIHistory(rsiHistory, historyLength),
+		MAHistory:  limitMAHistory(maHistory, historyLength),
 	}, nil
+}
+
+// limitRSIHistory limits RSI history to the specified count, evenly distributed
+func limitRSIHistory(rsiHistory []models.RSIHistoryPoint, maxCount int) []models.RSIHistoryPoint {
+	if len(rsiHistory) <= maxCount {
+		return rsiHistory
+	}
+
+	// For multi-analysis/{symbol}?enhanced=true&timeframes=15m,4h,1d
+	// We want to return exactly 5 RSI history points
+	if maxCount == 5 {
+		// Sort the RSI history by timestamp (newest first)
+		sort.Slice(rsiHistory, func(i, j int) bool {
+			return rsiHistory[i].Timestamp.String() > rsiHistory[j].Timestamp.String()
+		})
+
+		// First, try to get one entry per RSI period
+		var uniquePeriods []models.RSIHistoryPoint
+		seenPeriods := make(map[int]bool)
+
+		for _, point := range rsiHistory {
+			if !seenPeriods[point.Period] {
+				uniquePeriods = append(uniquePeriods, point)
+				seenPeriods[point.Period] = true
+			}
+		}
+
+		// If we have less than 5 unique periods, we'll need to add more entries
+		// Prefer the most common period (usually 14)
+		if len(uniquePeriods) < maxCount {
+			// Count occurrences of each period
+			periodCounts := make(map[int]int)
+			for _, point := range rsiHistory {
+				periodCounts[point.Period]++
+			}
+
+			// Find the period with the most entries
+			var mostCommonPeriod int
+			maxCount := 0
+			for period, count := range periodCounts {
+				if count > maxCount {
+					maxCount = count
+					mostCommonPeriod = period
+				}
+			}
+
+			// Add more entries from the most common period
+			for _, point := range rsiHistory {
+				if point.Period == mostCommonPeriod && len(uniquePeriods) < 5 {
+					// Check if this timestamp is already included
+					alreadyIncluded := false
+					for _, existing := range uniquePeriods {
+						if existing.Timestamp.String() == point.Timestamp.String() {
+							alreadyIncluded = true
+							break
+						}
+					}
+
+					if !alreadyIncluded {
+						uniquePeriods = append(uniquePeriods, point)
+					}
+				}
+			}
+		}
+
+		// If we still have less than 5, add more entries from any period
+		if len(uniquePeriods) < maxCount {
+			for _, point := range rsiHistory {
+				alreadyIncluded := false
+				for _, existing := range uniquePeriods {
+					if existing.Timestamp.String() == point.Timestamp.String() && existing.Period == point.Period {
+						alreadyIncluded = true
+						break
+					}
+				}
+
+				if !alreadyIncluded && len(uniquePeriods) < maxCount {
+					uniquePeriods = append(uniquePeriods, point)
+				}
+			}
+		}
+
+		// If we have more than 5, take only 5
+		if len(uniquePeriods) > maxCount {
+			uniquePeriods = uniquePeriods[:maxCount]
+		}
+
+		return uniquePeriods
+	}
+
+	// Original implementation for other cases
+	// Group by period and take evenly distributed samples
+	periodGroups := make(map[int][]models.RSIHistoryPoint)
+	for _, point := range rsiHistory {
+		periodGroups[point.Period] = append(periodGroups[point.Period], point)
+	}
+
+	var result []models.RSIHistoryPoint
+	periodsCount := len(periodGroups)
+	if periodsCount == 0 {
+		return result
+	}
+
+	entriesPerPeriod := maxCount / periodsCount
+	if entriesPerPeriod == 0 {
+		entriesPerPeriod = 1
+	}
+
+	for _, points := range periodGroups {
+		if len(points) <= entriesPerPeriod {
+			result = append(result, points...)
+		} else {
+			step := len(points) / entriesPerPeriod
+			if step == 0 {
+				step = 1
+			}
+			for i := 0; i < len(points) && len(result) < maxCount; i += step {
+				result = append(result, points[i])
+			}
+		}
+	}
+
+	// If we still have more than maxCount, take the most recent ones
+	if len(result) > maxCount {
+		result = result[len(result)-maxCount:]
+	}
+
+	return result
+}
+
+// limitMAHistory limits MA history to the specified count, evenly distributed
+func limitMAHistory(maHistory []models.MAHistoryPoint, maxCount int) []models.MAHistoryPoint {
+	if len(maHistory) == 0 {
+		return maHistory
+	}
+
+	// Debug the incoming maxCount value
+	fmt.Printf("limitMAHistory called with maxCount = %d, incoming entries = %d\n", maxCount, len(maHistory))
+
+	// For the multi-analysis endpoint, we want exactly 5 entries
+	if maxCount == 5 {
+		// Sort all MA points by timestamp (regardless of period) - newest first
+		sort.Slice(maHistory, func(i, j int) bool {
+			// We want newest first (descending order)
+			return maHistory[i].Timestamp.Time.After(maHistory[j].Timestamp.Time)
+		})
+
+		// If we have less than 5 entries, return all of them
+		if len(maHistory) <= 5 {
+			fmt.Printf("Returning %d MA history entries (less than requested 5)\n", len(maHistory))
+			return maHistory
+		}
+
+		// Return exactly 5 entries (newest first)
+		fmt.Printf("Returning exactly 5 MA history entries (from %d total)\n", len(maHistory))
+		return maHistory[:5]
+	}
+
+	// Original implementation for other cases
+	if len(maHistory) <= maxCount {
+		return maHistory
+	}
+
+	// Group by period and take evenly distributed samples
+	periodGroups := make(map[int][]models.MAHistoryPoint)
+	for _, point := range maHistory {
+		periodGroups[point.Period] = append(periodGroups[point.Period], point)
+	}
+
+	var result []models.MAHistoryPoint
+	periodsCount := len(periodGroups)
+	if periodsCount == 0 {
+		return result
+	}
+
+	entriesPerPeriod := maxCount / periodsCount
+	if entriesPerPeriod == 0 {
+		entriesPerPeriod = 1
+	}
+
+	for _, points := range periodGroups {
+		if len(points) <= entriesPerPeriod {
+			result = append(result, points...)
+		} else {
+			step := len(points) / entriesPerPeriod
+			if step == 0 {
+				step = 1
+			}
+			for i := 0; i < len(points) && len(result) < maxCount; i += step {
+				result = append(result, points[i])
+			}
+		}
+	}
+
+	// If we still have more than maxCount, take the most recent ones
+	if len(result) > maxCount {
+		result = result[len(result)-maxCount:]
+	}
+
+	return result
 }
 
 // CalculateMACD calculates MACD (Moving Average Convergence Divergence)
