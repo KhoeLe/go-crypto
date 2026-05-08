@@ -8,6 +8,7 @@ set -e
 # Configuration
 FUNCTION_NAME="go-crypto-api-sg"
 REGION="ap-southeast-1"
+API_PREFIX="/prod/api/v1"
 
 # Colors for output
 RED='\033[0;31m'
@@ -80,39 +81,39 @@ echo -e "${GREEN}✅ Lambda function found${NC}"
 
 # Test cases based on command line argument
 if [ "$1" = "health" ] || [ "$1" = "all" ]; then
-    test_endpoint "Health Check" '{"httpMethod":"GET","path":"/health"}' "200"
+    test_endpoint "Health Check" "{\"httpMethod\":\"GET\",\"path\":\"$API_PREFIX/health\"}" "200"
 fi
 
 if [ "$1" = "price" ] || [ "$1" = "all" ]; then
-    test_endpoint "Price - BTCUSDT" '{"httpMethod":"GET","path":"/api/v1/price/BTCUSDT"}' "200"
-    test_endpoint "Price - ETHUSDT" '{"httpMethod":"GET","path":"/api/v1/price/ETHUSDT"}' "200"
-    test_endpoint "Price - ETHFIUSDT" '{"httpMethod":"GET","path":"/api/v1/price/ETHFIUSDT"}' "200"
-    test_endpoint "Price - Invalid Symbol" '{"httpMethod":"GET","path":"/api/v1/price/INVALID"}' "400"
+    test_endpoint "Price - BTCUSDT" "{\"httpMethod\":\"GET\",\"path\":\"$API_PREFIX/price/BTCUSDT\"}" "200"
+    test_endpoint "Price - XAUUSDT" "{\"httpMethod\":\"GET\",\"path\":\"$API_PREFIX/price/XAUUSDT\"}" "200"
+    test_endpoint "Price - XAGUSDT" "{\"httpMethod\":\"GET\",\"path\":\"$API_PREFIX/price/XAGUSDT\"}" "200"
+    test_endpoint "Price - Invalid Symbol" "{\"httpMethod\":\"GET\",\"path\":\"$API_PREFIX/price/INVALID\"}" "400"
 fi
 
 if [ "$1" = "indicators" ] || [ "$1" = "all" ]; then
-    test_endpoint "Indicators - BTCUSDT" '{"httpMethod":"GET","path":"/api/v1/indicators/BTCUSDT"}' "200"
-    test_endpoint "Indicators - ETHUSDT" '{"httpMethod":"GET","path":"/api/v1/indicators/ETHUSDT"}' "200"
-    test_endpoint "Indicators - ETHFIUSDT" '{"httpMethod":"GET","path":"/api/v1/indicators/ETHFIUSDT"}' "200"
+    test_endpoint "Indicators - BTCUSDT" "{\"httpMethod\":\"GET\",\"path\":\"$API_PREFIX/indicators/BTCUSDT\"}" "200"
+    test_endpoint "Indicators - XAUUSDT" "{\"httpMethod\":\"GET\",\"path\":\"$API_PREFIX/indicators/XAUUSDT\",\"queryStringParameters\":{\"interval\":\"1h\"}}" "200"
+    test_endpoint "Indicators - XAGUSDT" "{\"httpMethod\":\"GET\",\"path\":\"$API_PREFIX/indicators/XAGUSDT\",\"queryStringParameters\":{\"interval\":\"1h\"}}" "200"
 fi
 
 if [ "$1" = "analysis" ] || [ "$1" = "all" ]; then
-    test_endpoint "Analysis - BTCUSDT" '{"httpMethod":"GET","path":"/api/v1/analysis/BTCUSDT"}' "200"
-    test_endpoint "Analysis - ETHUSDT" '{"httpMethod":"GET","path":"/api/v1/analysis/ETHUSDT"}' "200"
-    test_endpoint "Analysis - ETHFIUSDT" '{"httpMethod":"GET","path":"/api/v1/analysis/ETHFIUSDT"}' "200"
+    test_endpoint "Analysis - BTCUSDT" "{\"httpMethod\":\"GET\",\"path\":\"$API_PREFIX/analysis/BTCUSDT\"}" "200"
+    test_endpoint "Analysis - XAUUSDT" "{\"httpMethod\":\"GET\",\"path\":\"$API_PREFIX/analysis/XAUUSDT\",\"queryStringParameters\":{\"interval\":\"1h\"}}" "200"
+    test_endpoint "Analysis - XAGUSDT" "{\"httpMethod\":\"GET\",\"path\":\"$API_PREFIX/analysis/XAGUSDT\",\"queryStringParameters\":{\"interval\":\"1h\"}}" "200"
 fi
 
 # Handle specific symbol testing
 if [ "$1" = "price" ] && [ ! -z "$2" ]; then
-    test_endpoint "Price - $2" "{\"httpMethod\":\"GET\",\"path\":\"/api/v1/price/$2\"}" "any"
+    test_endpoint "Price - $2" "{\"httpMethod\":\"GET\",\"path\":\"$API_PREFIX/price/$2\"}" "any"
 fi
 
 if [ "$1" = "indicators" ] && [ ! -z "$2" ]; then
-    test_endpoint "Indicators - $2" "{\"httpMethod\":\"GET\",\"path\":\"/api/v1/indicators/$2\"}" "any"
+    test_endpoint "Indicators - $2" "{\"httpMethod\":\"GET\",\"path\":\"$API_PREFIX/indicators/$2\"}" "any"
 fi
 
 if [ "$1" = "analysis" ] && [ ! -z "$2" ]; then
-    test_endpoint "Analysis - $2" "{\"httpMethod\":\"GET\",\"path\":\"/api/v1/analysis/$2\"}" "any"
+    test_endpoint "Analysis - $2" "{\"httpMethod\":\"GET\",\"path\":\"$API_PREFIX/analysis/$2\"}" "any"
 fi
 
 # Show usage if no arguments
@@ -127,7 +128,7 @@ if [ -z "$1" ]; then
     echo -e "${YELLOW}Examples:${NC}"
     echo "  $0 all"
     echo "  $0 price BTCUSDT"
-    echo "  $0 indicators ETHFIUSDT"
+    echo "  $0 indicators XAUUSDT"
     exit 0
 fi
 

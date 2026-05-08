@@ -49,6 +49,9 @@ curl "http://localhost:8080/api/v1/analysis/BTCUSDT?interval=15m"
 curl "http://localhost:8080/api/v1/analysis/XAUUSDT?interval=1h"
 curl "http://localhost:8080/api/v1/multi-analysis/XAGUSDT?timeframes=15m,1h,4h"
 
+# AWS API Gateway uses the deployed stage prefix
+curl "https://<api-id>.execute-api.<region>.amazonaws.com/prod/api/v1/analysis/XAUUSDT?interval=1h"
+
 # Get trading signals
 curl http://localhost:8080/api/v1/signals/BTCUSDT
 ```

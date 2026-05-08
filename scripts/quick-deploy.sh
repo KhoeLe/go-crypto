@@ -13,6 +13,7 @@ LAMBDA_ZIP="lambda.zip"
 
 echo "🚀 Quick Deploy: Go Crypto API Lambda Function"
 echo "=============================================="
+echo "API Gateway stage path: /prod/api/v1"
 
 # Check if AWS CLI is configured
 if ! aws sts get-caller-identity > /dev/null 2>&1; then
@@ -56,16 +57,37 @@ if [ $? -eq 0 ]; then
     echo "Testing health endpoint..."
     aws lambda invoke \
         --function-name "$FUNCTION_NAME" \
-        --payload '{"httpMethod":"GET","path":"/health"}' \
+        --payload '{"httpMethod":"GET","path":"/prod/api/v1/health"}' \
         --region "$REGION" \
         response.json > /dev/null
     
-    if [ $? -eq 0 ]; then
+    status_code=$(jq -r '.statusCode // empty' response.json 2>/dev/null || true)
+    if [ $? -eq 0 ] && [ "$status_code" = "200" ]; then
         echo "✅ Health check passed"
         cat response.json | jq .
         rm -f response.json
     else
         echo "❌ Health check failed"
+        cat response.json | jq . 2>/dev/null || cat response.json
+        exit 1
+    fi
+
+    echo "Testing XAU futures analysis endpoint..."
+    aws lambda invoke \
+        --function-name "$FUNCTION_NAME" \
+        --payload '{"httpMethod":"GET","path":"/prod/api/v1/analysis/XAUUSDT","queryStringParameters":{"interval":"1h"}}' \
+        --region "$REGION" \
+        response.json > /dev/null
+
+    status_code=$(jq -r '.statusCode // empty' response.json 2>/dev/null || true)
+    if [ "$status_code" = "200" ]; then
+        echo "✅ XAU analysis check passed"
+        cat response.json | jq '.statusCode, (.body | fromjson | .data.symbol), (.body | fromjson | .data.trend)' 2>/dev/null || cat response.json
+        rm -f response.json
+    else
+        echo "❌ XAU analysis check failed"
+        cat response.json | jq . 2>/dev/null || cat response.json
+        exit 1
     fi
     
     echo ""

@@ -630,9 +630,11 @@ func (s *Server) handleGetSignals(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	s.sendSuccess(w, map[string]interface{}{
-		"status":    "healthy",
-		"timestamp": nowGMT7(),
-		"version":   "1.0.0", // Changed version to test hot reload
+		"status":      "healthy",
+		"service":     "go-crypto-api",
+		"version":     "2.1.0-xau-xag-futures",
+		"environment": "lambda-api-gateway",
+		"timestamp":   nowGMT7(),
 	})
 }
 

@@ -16,6 +16,7 @@ echo "🚀 AWS Lambda Deployment: Go Crypto API"
 echo "========================================"
 echo "Function: $FUNCTION_NAME"
 echo "Region: $REGION"
+echo "API Gateway stage path: /prod/api/v1"
 echo ""
 
 # Check if AWS CLI is configured
@@ -131,32 +132,38 @@ echo "🧪 Testing deployment..."
 echo "Testing health endpoint..."
 aws lambda invoke \
     --function-name "$FUNCTION_NAME" \
-    --payload '{"httpMethod":"GET","path":"/health"}' \
+    --payload '{"httpMethod":"GET","path":"/prod/api/v1/health"}' \
     --region "$REGION" \
     response.json > /dev/null
 
-if [ $? -eq 0 ]; then
+status_code=$(jq -r '.statusCode // empty' response.json 2>/dev/null || true)
+if [ $? -eq 0 ] && [ "$status_code" = "200" ]; then
     echo "✅ Health check passed"
     cat response.json | jq . 2>/dev/null || cat response.json
     rm -f response.json
 else
     echo "❌ Health check failed"
+    cat response.json | jq . 2>/dev/null || cat response.json
+    exit 1
 fi
 
-# Test price endpoint
-echo "Testing price endpoint..."
+# Test futures price endpoint
+echo "Testing XAU futures price endpoint..."
 aws lambda invoke \
     --function-name "$FUNCTION_NAME" \
-    --payload '{"httpMethod":"GET","path":"/api/v1/price/BTCUSDT"}' \
+    --payload '{"httpMethod":"GET","path":"/prod/api/v1/price/XAUUSDT"}' \
     --region "$REGION" \
     response.json > /dev/null
 
-if [ $? -eq 0 ]; then
-    echo "✅ Price endpoint test passed"
+status_code=$(jq -r '.statusCode // empty' response.json 2>/dev/null || true)
+if [ $? -eq 0 ] && [ "$status_code" = "200" ]; then
+    echo "✅ XAU price endpoint test passed"
     cat response.json | jq . 2>/dev/null || cat response.json
     rm -f response.json
 else
-    echo "❌ Price endpoint test failed"
+    echo "❌ XAU price endpoint test failed"
+    cat response.json | jq . 2>/dev/null || cat response.json
+    exit 1
 fi
 
 echo ""
