@@ -1,8 +1,13 @@
 binance:
   base_url: "https://api.binance.com"
+  futures_base_url: "https://fapi.binance.com"
   websocket_url: "wss://stream.binance.com:9443/ws"
+  futures_websocket_url: "wss://fstream.binance.com/ws"
   timeout: 30
   rate_limit: 1200
+  futures_symbols:
+    - "XAUUSDT"
+    - "XAGUSDT"
 
 symbols:
   - "BTCUSDT"
@@ -10,9 +15,13 @@ symbols:
   - "BNBUSDT"
   - "ADAUSDT"
   - "SOLUSDT"
+  - "XAUTUSDT"
+  - "XAUUSDT"
+  - "XAGUSDT"
 
 intervals:
   - "15m"
+  - "1h"
   - "4h"
   - "1d"
 
@@ -20,7 +29,7 @@ indicators:
   rsi:
     periods: [6, 12, 24]
   ma:
-    periods: [7, 25, 99]
+    periods: [7, 20, 25, 50, 99, 200]
     type: "SMA" # SMA, EMA, WMA
   kdj:
     k_period: 9

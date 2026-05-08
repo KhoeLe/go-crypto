@@ -86,8 +86,17 @@ func mergeConfigs(defaultCfg, userCfg *Config) *Config {
 	if userCfg.Binance.BaseURL != "" {
 		merged.Binance.BaseURL = userCfg.Binance.BaseURL
 	}
+	if userCfg.Binance.FuturesBaseURL != "" {
+		merged.Binance.FuturesBaseURL = userCfg.Binance.FuturesBaseURL
+	}
 	if userCfg.Binance.WebSocketURL != "" {
 		merged.Binance.WebSocketURL = userCfg.Binance.WebSocketURL
+	}
+	if userCfg.Binance.FuturesWebSocketURL != "" {
+		merged.Binance.FuturesWebSocketURL = userCfg.Binance.FuturesWebSocketURL
+	}
+	if len(userCfg.Binance.FuturesSymbols) > 0 {
+		merged.Binance.FuturesSymbols = userCfg.Binance.FuturesSymbols
 	}
 	if userCfg.Binance.APIKey != "" {
 		merged.Binance.APIKey = userCfg.Binance.APIKey
@@ -148,8 +157,14 @@ func ValidateConfig(cfg *Config) error {
 	if cfg.Binance.BaseURL == "" {
 		return fmt.Errorf("binance base URL is required")
 	}
+	if cfg.Binance.FuturesBaseURL == "" {
+		return fmt.Errorf("binance futures base URL is required")
+	}
 	if cfg.Binance.WebSocketURL == "" {
 		return fmt.Errorf("binance WebSocket URL is required")
+	}
+	if cfg.Binance.FuturesWebSocketURL == "" {
+		return fmt.Errorf("binance futures WebSocket URL is required")
 	}
 	if cfg.Binance.Timeout <= 0 {
 		return fmt.Errorf("binance timeout must be positive")

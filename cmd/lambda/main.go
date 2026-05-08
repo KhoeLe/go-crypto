@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"strings"
 	"time"
 
@@ -48,17 +51,23 @@ func NewLambdaHandler() (*LambdaHandler, error) {
 	// Load configuration with defaults for Lambda
 	cfg := &config.Config{
 		Binance: config.BinanceConfig{
-			BaseURL:      "https://api.binance.com",
-			WebSocketURL: "wss://stream.binance.com:9443",
+			BaseURL:             "https://api.binance.com",
+			FuturesBaseURL:      "https://fapi.binance.com",
+			WebSocketURL:        "wss://stream.binance.com:9443",
+			FuturesWebSocketURL: "wss://fstream.binance.com/ws",
+			FuturesSymbols:      []string{"XAUUSDT", "XAGUSDT"},
+			Timeout:             30,
+			RateLimit:           1200,
 		},
-		Symbols:   []string{"BTCUSDT", "ETHUSDT", "BNBUSDT"},
-		Intervals: []string{"15m", "4h", "1d"},
+		Symbols:   []string{"BTCUSDT", "ETHUSDT", "BNBUSDT", "XAUTUSDT", "XAUUSDT", "XAGUSDT"},
+		Intervals: []string{"15m", "1h", "4h", "1d"},
 		Indicators: config.IndicatorConfig{
 			RSI: config.RSIConfig{
 				Periods: []int{6, 12, 24},
 			},
 			MA: config.MAConfig{
-				Periods: []int{7, 25, 99},
+				Periods: []int{7, 20, 25, 50, 99, 200},
+				Type:    "SMA",
 			},
 			KDJ: config.KDJConfig{
 				KPeriod: 9,
@@ -102,20 +111,29 @@ func (h *LambdaHandler) HandleRequest(ctx context.Context, request events.APIGat
 
 	log.Printf("Cleaned path: %s", path)
 
-	// Simple routing based on the cleaned path
-	switch {
-	case strings.HasPrefix(path, "/api/v1/health"):
-		return h.handleHealth(ctx, request)
-	case strings.HasPrefix(path, "/api/v1/multi-analysis/"):
-		return h.handleMultiAnalysis(ctx, request)
-	case strings.HasPrefix(path, "/api/v1/price/"):
-		return h.handlePrice(ctx, request)
-	case strings.HasPrefix(path, "/api/v1/analysis/"):
-		return h.handleAnalysis(ctx, request)
-	default:
-		log.Printf("No route matched for path: %s (original: %s)", path, request.Path)
-		return h.errorResponse(404, "Not Found")
+	httpRequest, err := h.toHTTPRequest(ctx, request, path)
+	if err != nil {
+		return h.errorResponse(400, "Invalid request")
 	}
+	recorder := httptest.NewRecorder()
+	h.server.GetHandler().ServeHTTP(recorder, httpRequest)
+
+	headers := h.getCORSHeaders()
+	for key, values := range recorder.Result().Header {
+		if len(values) > 0 {
+			headers[key] = values[0]
+		}
+	}
+
+	statusCode := recorder.Code
+	if statusCode == 0 {
+		statusCode = http.StatusOK
+	}
+	return events.APIGatewayProxyResponse{
+		StatusCode: statusCode,
+		Body:       recorder.Body.String(),
+		Headers:    headers,
+	}, nil
 }
 
 // handleHealth handles health check requests
@@ -287,6 +305,38 @@ func (h *LambdaHandler) handleMultiAnalysis(ctx context.Context, request events.
 		Body:       string(jsonData),
 		Headers:    h.getCORSHeaders(),
 	}, nil
+}
+
+func (h *LambdaHandler) toHTTPRequest(ctx context.Context, request events.APIGatewayProxyRequest, path string) (*http.Request, error) {
+	query := url.Values{}
+	for key, value := range request.QueryStringParameters {
+		query.Set(key, value)
+	}
+	for key, values := range request.MultiValueQueryStringParameters {
+		for _, value := range values {
+			query.Add(key, value)
+		}
+	}
+
+	target := path
+	if encodedQuery := query.Encode(); encodedQuery != "" {
+		target += "?" + encodedQuery
+	}
+
+	method := request.HTTPMethod
+	if method == "" {
+		method = http.MethodGet
+	}
+
+	httpRequest, err := http.NewRequestWithContext(ctx, method, target, strings.NewReader(request.Body))
+	if err != nil {
+		return nil, err
+	}
+	for key, value := range request.Headers {
+		httpRequest.Header.Set(key, value)
+	}
+	httpRequest.RemoteAddr = request.RequestContext.Identity.SourceIP
+	return httpRequest, nil
 }
 
 // getCORSHeaders returns CORS headers for API responses

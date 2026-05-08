@@ -38,8 +38,16 @@ curl http://localhost:8080/api/v1/health
 # Get current BTC price
 curl http://localhost:8080/api/v1/price/BTCUSDT
 
+# Get Binance futures gold/silver prices
+curl http://localhost:8080/api/v1/price/XAUUSDT
+curl http://localhost:8080/api/v1/price/XAGUSDT
+
 # Get complete analysis
 curl "http://localhost:8080/api/v1/analysis/BTCUSDT?interval=15m"
+
+# XAU/XAG trading-context style analysis with 200-candle MA support
+curl "http://localhost:8080/api/v1/analysis/XAUUSDT?interval=1h"
+curl "http://localhost:8080/api/v1/multi-analysis/XAGUSDT?timeframes=15m,1h,4h"
 
 # Get trading signals
 curl http://localhost:8080/api/v1/signals/BTCUSDT
@@ -115,6 +123,14 @@ Edit `configs/config.yaml` to customize:
 - Timeframes
 - Indicator parameters
 - API settings
+
+### Gold/Silver Routing
+
+The API supports both spot and USD-M futures Binance endpoints:
+
+- `XAUTUSDT` uses Binance spot and is useful as a tokenized-gold proxy.
+- `XAUUSDT` and `XAGUSDT` use Binance USD-M futures endpoints through `binance.futures_base_url`.
+- `/api/v1/analysis/{symbol}` fetches enough candles for MA99/MA200, so trend signals are suitable for external XAU/XAG alert pipelines.
 
 ## Technical Indicators
 

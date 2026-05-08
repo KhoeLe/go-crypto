@@ -11,7 +11,12 @@ const (
 	BTCUSDT   Symbol = "BTCUSDT"
 	ETHUSDT   Symbol = "ETHUSDT"
 	BNBUSDT   Symbol = "BNBUSDT"
+	ADAUSDT   Symbol = "ADAUSDT"
+	SOLUSDT   Symbol = "SOLUSDT"
 	ETHFIUSDT Symbol = "ETHFIUSDT"
+	XAUTUSDT  Symbol = "XAUTUSDT"
+	XAUUSDT   Symbol = "XAUUSDT"
+	XAGUSDT   Symbol = "XAGUSDT"
 )
 
 // Timeframe represents different chart timeframes
@@ -19,6 +24,7 @@ type Timeframe string
 
 const (
 	Timeframe15m Timeframe = "15m"
+	Timeframe1h  Timeframe = "1h"
 	Timeframe4h  Timeframe = "4h"
 	Timeframe1d  Timeframe = "1d"
 )
