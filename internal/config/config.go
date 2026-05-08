@@ -16,12 +16,15 @@ type Config struct {
 
 // BinanceConfig represents Binance API configuration
 type BinanceConfig struct {
-	BaseURL      string `yaml:"base_url"`
-	WebSocketURL string `yaml:"websocket_url"`
-	APIKey       string `yaml:"api_key,omitempty"`
-	SecretKey    string `yaml:"secret_key,omitempty"`
-	Timeout      int    `yaml:"timeout"`
-	RateLimit    int    `yaml:"rate_limit"`
+	BaseURL             string   `yaml:"base_url"`
+	FuturesBaseURL      string   `yaml:"futures_base_url"`
+	WebSocketURL        string   `yaml:"websocket_url"`
+	FuturesWebSocketURL string   `yaml:"futures_websocket_url"`
+	FuturesSymbols      []string `yaml:"futures_symbols"`
+	APIKey              string   `yaml:"api_key,omitempty"`
+	SecretKey           string   `yaml:"secret_key,omitempty"`
+	Timeout             int      `yaml:"timeout"`
+	RateLimit           int      `yaml:"rate_limit"`
 }
 
 // IndicatorConfig represents technical indicator parameters
@@ -78,19 +81,27 @@ type RateLimitTier struct {
 func DefaultConfig() *Config {
 	return &Config{
 		Binance: BinanceConfig{
-			BaseURL:      "https://api.binance.com",
-			WebSocketURL: "wss://stream.binance.com:9443/ws",
-			Timeout:      30,
-			RateLimit:    1200, // requests per minute
+			BaseURL:             "https://api.binance.com",
+			FuturesBaseURL:      "https://fapi.binance.com",
+			WebSocketURL:        "wss://stream.binance.com:9443/ws",
+			FuturesWebSocketURL: "wss://fstream.binance.com/ws",
+			FuturesSymbols:      []string{"XAUUSDT", "XAGUSDT"},
+			Timeout:             30,
+			RateLimit:           1200, // requests per minute
 		},
 		Symbols: []string{
 			string(models.BTCUSDT),
 			string(models.ETHUSDT),
 			string(models.BNBUSDT),
-			string(models.ETHFIUSDT),
+			string(models.ADAUSDT),
+			string(models.SOLUSDT),
+			string(models.XAUTUSDT),
+			string(models.XAUUSDT),
+			string(models.XAGUSDT),
 		},
 		Intervals: []string{
 			string(models.Timeframe15m),
+			string(models.Timeframe1h),
 			string(models.Timeframe4h),
 			string(models.Timeframe1d),
 		},
@@ -99,7 +110,7 @@ func DefaultConfig() *Config {
 				Periods: []int{6, 12, 24},
 			},
 			MA: MAConfig{
-				Periods: []int{7, 25, 99},
+				Periods: []int{7, 20, 25, 50, 99, 200},
 				Type:    "SMA",
 			},
 			KDJ: KDJConfig{

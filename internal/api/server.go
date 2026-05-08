@@ -28,6 +28,33 @@ func nowGMT7() models.GMTPlus7Time {
 	return models.NewGMTPlus7Time(time.Now().In(loc))
 }
 
+func maxInt(values ...int) int {
+	maxValue := 0
+	for _, value := range values {
+		if value > maxValue {
+			maxValue = value
+		}
+	}
+	return maxValue
+}
+
+func configuredTimeframes(values []string) []models.Timeframe {
+	timeframes := make([]models.Timeframe, 0, len(values))
+	seen := make(map[string]bool)
+	for _, value := range values {
+		tf := strings.TrimSpace(value)
+		if tf == "" || seen[tf] || !utils.ValidateTimeframe(tf) {
+			continue
+		}
+		seen[tf] = true
+		timeframes = append(timeframes, models.Timeframe(tf))
+	}
+	if len(timeframes) > 0 {
+		return timeframes
+	}
+	return []models.Timeframe{models.Timeframe15m, models.Timeframe1h, models.Timeframe4h, models.Timeframe1d}
+}
+
 // Server represents the API server
 type Server struct {
 	router        *mux.Router
@@ -51,6 +78,31 @@ func NewServer(cfg *config.Config, logger *logrus.Logger) *Server {
 
 	s.setupRoutes()
 	return s
+}
+
+func (s *Server) analysisKlineLimit(extra int) int {
+	required := maxInt(
+		maxInt(s.config.Indicators.RSI.Periods...)+1,
+		maxInt(s.config.Indicators.MA.Periods...),
+		s.config.Indicators.KDJ.KPeriod+s.config.Indicators.KDJ.DPeriod+s.config.Indicators.KDJ.JPeriod,
+		35,
+		extra,
+	)
+	if required < 120 {
+		required = 120
+	}
+	if required > 1000 {
+		return 1000
+	}
+	return required
+}
+
+func (s *Server) defaultTimeframes() []models.Timeframe {
+	return configuredTimeframes(s.config.Intervals)
+}
+
+func maKey(period int) string {
+	return fmt.Sprintf("MA_%d", period)
 }
 
 // setupRoutes configures API routes
@@ -123,6 +175,8 @@ type AnalysisResponse struct {
 	KDJ             models.KDJIndicator        `json:"kdj"`
 	MACD            models.MACDIndicator       `json:"macd"`
 	Volatility      decimal.Decimal            `json:"volatility"`
+	Trend           string                     `json:"trend"`
+	TrendConfidence decimal.Decimal            `json:"trend_confidence"`
 	MarketSentiment string                     `json:"market_sentiment"`
 	Signals         []string                   `json:"signals"`
 	Timestamp       models.GMTPlus7Time        `json:"timestamp"`
@@ -273,7 +327,7 @@ func (s *Server) handleGetIndicators(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	// Fetch klines data
-	klines, err := s.binanceClient.GetKlines(ctx, symbol, models.Timeframe(interval), 25)
+	klines, err := s.binanceClient.GetKlines(ctx, symbol, models.Timeframe(interval), s.analysisKlineLimit(0))
 	if err != nil {
 		s.logger.WithError(err).Error("Failed to fetch klines")
 		s.sendError(w, http.StatusInternalServerError, "Failed to fetch market data")
@@ -300,7 +354,7 @@ func (s *Server) handleGetIndicators(w http.ResponseWriter, r *http.Request) {
 			ma, err = s.calculator.CalculateSMA(klines, period)
 		}
 		if err == nil {
-			maValues[fmt.Sprintf("MA_%d", period)] = ma
+			maValues[maKey(period)] = ma
 		}
 	}
 
@@ -381,11 +435,7 @@ func (s *Server) handleGetMultiAnalysis(w http.ResponseWriter, r *http.Request) 
 
 	// Default timeframes - focus on 15m as requested
 	if len(timeframes) == 0 {
-		timeframes = []models.Timeframe{
-			models.Timeframe15m, // Primary focus as requested
-			models.Timeframe4h,
-			models.Timeframe1d,
-		}
+		timeframes = s.defaultTimeframes()
 	}
 
 	// Check if enhanced analysis is requested (query parameter)
@@ -587,13 +637,29 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
-	s.sendSuccess(w, s.config)
+	safeConfig := *s.config
+	safeConfig.Binance.APIKey = ""
+	safeConfig.Binance.SecretKey = ""
+	s.sendSuccess(w, safeConfig)
 }
 
 func (s *Server) handleGetSymbols(w http.ResponseWriter, r *http.Request) {
 	s.sendSuccess(w, map[string]interface{}{
-		"symbols":   s.config.Symbols,
-		"intervals": s.config.Intervals,
+		"symbols":         s.config.Symbols,
+		"futures_symbols": s.config.Binance.FuturesSymbols,
+		"intervals":       s.config.Intervals,
+		"market_notes": map[string]string{
+			"XAUTUSDT": "spot tokenized gold proxy",
+			"XAUUSDT":  "USD-M futures gold contract",
+			"XAGUSDT":  "USD-M futures silver contract",
+		},
+		"features": []string{
+			"real-time-prices",
+			"technical-indicators",
+			"multi-timeframe-analysis",
+			"spot-and-usdm-futures-routing",
+			"xau-xag-trading-context",
+		},
 		"timestamp": nowGMT7(),
 	})
 }
@@ -659,7 +725,7 @@ func (s *Server) handleGetEnhancedAnalysis(w http.ResponseWriter, r *http.Reques
 // Helper functions
 func (s *Server) getSymbolAnalysis(ctx context.Context, symbol models.Symbol, timeframe models.Timeframe) (*AnalysisResponse, error) {
 	// Fetch market data
-	klines, err := s.binanceClient.GetKlines(ctx, symbol, timeframe, 25)
+	klines, err := s.binanceClient.GetKlines(ctx, symbol, timeframe, s.analysisKlineLimit(0))
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch klines: %w", err)
 	}
@@ -688,7 +754,7 @@ func (s *Server) getSymbolAnalysis(ctx context.Context, symbol models.Symbol, ti
 			ma, err = s.calculator.CalculateSMA(klines, period)
 		}
 		if err == nil {
-			maValues[fmt.Sprintf("MA_%d", period)] = ma
+			maValues[maKey(period)] = ma
 		}
 	}
 
@@ -699,8 +765,8 @@ func (s *Server) getSymbolAnalysis(ctx context.Context, symbol models.Symbol, ti
 
 	volatility, _ := s.calculator.CalculateVolatility(klines, 20)
 
-	// Calculate MACD (5, 10, 3 parameters work better with limited data)
-	macd, err := s.calculator.CalculateMACD(klines, 5, 10, 3)
+	// Calculate standard MACD now that analysis fetches enough history.
+	macd, err := s.calculator.CalculateMACD(klines, 12, 26, 9)
 	if err != nil {
 		// Use zero values if MACD calculation fails
 		macd = models.MACDIndicator{}
@@ -708,9 +774,11 @@ func (s *Server) getSymbolAnalysis(ctx context.Context, symbol models.Symbol, ti
 
 	// Generate market sentiment
 	marketSentiment := s.calculator.GenerateMarketSentiment(rsiValues, macd, kdj, ticker.PriceChangePercent)
+	trend, trendConfidence := s.deriveTrend(ticker.Price, maValues)
 
 	// Generate signals
 	signals := s.generateSignals(ticker, rsiValues, maValues, kdj)
+	signals = append(signals, s.trendSignals(trend, trendConfidence)...)
 
 	return &AnalysisResponse{
 		Symbol:          string(symbol),
@@ -721,6 +789,8 @@ func (s *Server) getSymbolAnalysis(ctx context.Context, symbol models.Symbol, ti
 		KDJ:             kdj,
 		MACD:            macd,
 		Volatility:      volatility,
+		Trend:           trend,
+		TrendConfidence: trendConfidence,
 		MarketSentiment: marketSentiment,
 		Signals:         signals,
 		Timestamp:       nowGMT7(),
@@ -729,8 +799,9 @@ func (s *Server) getSymbolAnalysis(ctx context.Context, symbol models.Symbol, ti
 
 // getEnhancedSymbolAnalysis performs enhanced analysis with new features
 func (s *Server) getEnhancedSymbolAnalysis(ctx context.Context, symbol models.Symbol, timeframe models.Timeframe) (*models.EnhancedAnalysisResponse, error) {
-	// Fetch market data with limit of 50 for calculation, but only return 25 in response
-	limit := 50
+	// Fetch enough history for MA99/MA200 and standard MACD; only return a
+	// compact recent slice in the response.
+	limit := s.analysisKlineLimit(0)
 	klines, err := s.binanceClient.GetKlines(ctx, symbol, timeframe, limit)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch klines: %w", err)
@@ -760,7 +831,7 @@ func (s *Server) getEnhancedSymbolAnalysis(ctx context.Context, symbol models.Sy
 			ma, err = s.calculator.CalculateSMA(klines, period)
 		}
 		if err == nil {
-			maValues[fmt.Sprintf("MA_%d", period)] = ma
+			maValues[maKey(period)] = ma
 		}
 	}
 
@@ -771,8 +842,8 @@ func (s *Server) getEnhancedSymbolAnalysis(ctx context.Context, symbol models.Sy
 
 	volatility, _ := s.calculator.CalculateVolatility(klines, 20)
 
-	// Calculate MACD (5, 10, 3 parameters work better with limited data)
-	macd, err := s.calculator.CalculateMACD(klines, 5, 10, 3)
+	// Calculate standard MACD now that enhanced analysis fetches enough history.
+	macd, err := s.calculator.CalculateMACD(klines, 12, 26, 9)
 	if err != nil {
 		// Use zero values if MACD calculation fails
 		macd = models.MACDIndicator{}
@@ -899,6 +970,8 @@ func (s *Server) getEnhancedSymbolAnalysis(ctx context.Context, symbol models.Sy
 
 	// Generate enhanced signals including pump detection
 	signals := s.generateEnhancedSignals(ticker, rsiValues, maValues, kdj, moneyFlow, volumeBreakout, volumeDelta, whaleActivity)
+	trend, trendConfidence := s.deriveTrend(ticker.Price, maValues)
+	signals = append(signals, s.trendSignals(trend, trendConfidence)...)
 
 	// Return only the last 15 klines in the response (but use all 50 for calculations)
 	responseKlines := klines
@@ -957,19 +1030,15 @@ func (s *Server) generateEnhancedSignals(ticker *models.TickerPrice, rsiValues m
 	}
 
 	// Moving Average signals
-	if ma7, exists := maValues["MA_7"]; exists {
-		if ticker.Price.GreaterThan(ma7) {
-			signals = append(signals, "PRICE_ABOVE_MA7")
-		} else {
-			signals = append(signals, "PRICE_BELOW_MA7")
+	for _, period := range []int{7, 20, 25, 50, 99, 200} {
+		ma, exists := maValues[maKey(period)]
+		if !exists || ma.IsZero() {
+			continue
 		}
-	}
-
-	if ma25, exists := maValues["MA_25"]; exists {
-		if ticker.Price.GreaterThan(ma25) {
-			signals = append(signals, "PRICE_ABOVE_MA25")
+		if ticker.Price.GreaterThan(ma) {
+			signals = append(signals, fmt.Sprintf("PRICE_ABOVE_MA_%d", period))
 		} else {
-			signals = append(signals, "PRICE_BELOW_MA25")
+			signals = append(signals, fmt.Sprintf("PRICE_BELOW_MA_%d", period))
 		}
 	}
 
@@ -1046,6 +1115,53 @@ func (s *Server) generateEnhancedSignals(ticker *models.TickerPrice, rsiValues m
 	return signals
 }
 
+func (s *Server) deriveTrend(price decimal.Decimal, maValues map[string]decimal.Decimal) (string, decimal.Decimal) {
+	periods := []int{20, 50, 99, 200}
+	available := 0
+	bullish := 0
+	bearish := 0
+
+	for _, period := range periods {
+		ma, exists := maValues[maKey(period)]
+		if !exists || ma.IsZero() {
+			continue
+		}
+		available++
+		if price.GreaterThan(ma) {
+			bullish++
+		} else if price.LessThan(ma) {
+			bearish++
+		}
+	}
+
+	if available == 0 {
+		return "unknown", decimal.Zero
+	}
+
+	confidence := decimal.NewFromInt(int64(maxInt(bullish, bearish))).Div(decimal.NewFromInt(int64(available))).Mul(decimal.NewFromInt(100))
+	if bullish >= 3 || (bullish >= 2 && bearish == 0) {
+		return "bullish", confidence.Round(2)
+	}
+	if bearish >= 3 || (bearish >= 2 && bullish == 0) {
+		return "bearish", confidence.Round(2)
+	}
+	return "mixed", confidence.Round(2)
+}
+
+func (s *Server) trendSignals(trend string, confidence decimal.Decimal) []string {
+	if confidence.LessThan(decimal.NewFromInt(60)) {
+		return nil
+	}
+	switch trend {
+	case "bullish":
+		return []string{"TREND_BULLISH"}
+	case "bearish":
+		return []string{"TREND_BEARISH"}
+	default:
+		return nil
+	}
+}
+
 // generateSignals creates basic trading signals (traditional method)
 func (s *Server) generateSignals(ticker *models.TickerPrice, rsiValues map[string]decimal.Decimal, maValues map[string]decimal.Decimal, kdj models.KDJIndicator) []string {
 	var signals []string
@@ -1069,19 +1185,15 @@ func (s *Server) generateSignals(ticker *models.TickerPrice, rsiValues map[strin
 	}
 
 	// Moving Average signals
-	if ma7, exists := maValues["MA_7"]; exists {
-		if ticker.Price.GreaterThan(ma7) {
-			signals = append(signals, "PRICE_ABOVE_MA7")
-		} else {
-			signals = append(signals, "PRICE_BELOW_MA7")
+	for _, period := range []int{7, 20, 25, 50, 99, 200} {
+		ma, exists := maValues[maKey(period)]
+		if !exists || ma.IsZero() {
+			continue
 		}
-	}
-
-	if ma25, exists := maValues["MA_25"]; exists {
-		if ticker.Price.GreaterThan(ma25) {
-			signals = append(signals, "PRICE_ABOVE_MA25")
+		if ticker.Price.GreaterThan(ma) {
+			signals = append(signals, fmt.Sprintf("PRICE_ABOVE_MA_%d", period))
 		} else {
-			signals = append(signals, "PRICE_BELOW_MA25")
+			signals = append(signals, fmt.Sprintf("PRICE_BELOW_MA_%d", period))
 		}
 	}
 
@@ -1452,7 +1564,9 @@ func (s *Server) GetMultiAnalysis(ctx context.Context, symbol string, timeframes
 
 	// Default timeframes if none provided
 	if len(timeframes) == 0 {
-		timeframes = []string{"15m", "4h", "1d"}
+		for _, timeframe := range s.defaultTimeframes() {
+			timeframes = append(timeframes, string(timeframe))
+		}
 	}
 
 	// Validate all timeframes
@@ -1513,7 +1627,9 @@ func (s *Server) GetEnhancedMultiAnalysis(ctx context.Context, symbol string, ti
 
 	// Default timeframes if none provided
 	if len(timeframes) == 0 {
-		timeframes = []string{"15m", "4h", "1d"}
+		for _, timeframe := range s.defaultTimeframes() {
+			timeframes = append(timeframes, string(timeframe))
+		}
 	}
 
 	// Validate all timeframes

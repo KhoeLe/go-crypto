@@ -60,6 +60,12 @@ type Client struct {
 
 // NewClient creates a new Binance API client
 func NewClient(cfg *config.BinanceConfig, logger *logrus.Logger) *Client {
+	if cfg.FuturesBaseURL == "" {
+		cfg.FuturesBaseURL = "https://fapi.binance.com"
+	}
+	if cfg.FuturesWebSocketURL == "" {
+		cfg.FuturesWebSocketURL = "wss://fstream.binance.com/ws"
+	}
 	return &Client{
 		config: cfg,
 		httpClient: &http.Client{
@@ -69,15 +75,56 @@ func NewClient(cfg *config.BinanceConfig, logger *logrus.Logger) *Client {
 	}
 }
 
+// IsFuturesSymbol returns true for symbols that should be queried through
+// Binance USD-M futures endpoints. XAU/XAG TradFi perpetuals live there, while
+// XAUTUSDT is a spot tokenized-gold symbol and should stay on spot endpoints.
+func (c *Client) IsFuturesSymbol(symbol models.Symbol) bool {
+	s := strings.ToUpper(string(symbol))
+	for _, futuresSymbol := range c.config.FuturesSymbols {
+		if strings.ToUpper(futuresSymbol) == s {
+			return true
+		}
+	}
+	return s == "XAUUSDT" || s == "XAGUSDT"
+}
+
+func (c *Client) restBaseURL(symbol models.Symbol) string {
+	if c.IsFuturesSymbol(symbol) {
+		return c.config.FuturesBaseURL
+	}
+	return c.config.BaseURL
+}
+
+func (c *Client) websocketBaseURL(symbol models.Symbol) string {
+	if c.IsFuturesSymbol(symbol) {
+		return c.config.FuturesWebSocketURL
+	}
+	return c.config.WebSocketURL
+}
+
+func (c *Client) klinesEndpoint(symbol models.Symbol) string {
+	if c.IsFuturesSymbol(symbol) {
+		return "/fapi/v1/klines"
+	}
+	return "/api/v3/klines"
+}
+
+func (c *Client) tickerEndpoint(symbol models.Symbol) string {
+	if c.IsFuturesSymbol(symbol) {
+		return "/fapi/v1/ticker/24hr"
+	}
+	return "/api/v3/ticker/24hr"
+}
+
 // GetKlines fetches historical kline data
 func (c *Client) GetKlines(ctx context.Context, symbol models.Symbol, interval models.Timeframe, limit int) ([]models.Kline, error) {
-	endpoint := "/api/v3/klines"
+	endpoint := c.klinesEndpoint(symbol)
 	params := url.Values{}
 	params.Set("symbol", string(symbol))
 	params.Set("interval", string(interval))
 	params.Set("limit", strconv.Itoa(limit))
 
-	url := fmt.Sprintf("%s%s?%s", c.config.BaseURL, endpoint, params.Encode())
+	url := fmt.Sprintf("%s%s?%s", c.restBaseURL(symbol), endpoint, params.Encode())
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
@@ -128,11 +175,11 @@ func (c *Client) GetKlines(ctx context.Context, symbol models.Symbol, interval m
 
 // GetTicker24hr fetches 24hr ticker price statistics
 func (c *Client) GetTicker24hr(ctx context.Context, symbol models.Symbol) (*models.TickerPrice, error) {
-	endpoint := "/api/v3/ticker/24hr"
+	endpoint := c.tickerEndpoint(symbol)
 	params := url.Values{}
 	params.Set("symbol", string(symbol))
 
-	url := fmt.Sprintf("%s%s?%s", c.config.BaseURL, endpoint, params.Encode())
+	url := fmt.Sprintf("%s%s?%s", c.restBaseURL(symbol), endpoint, params.Encode())
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
@@ -191,7 +238,11 @@ func (c *Client) ConnectWebSocket(ctx context.Context, symbols []models.Symbol, 
 	}
 
 	streamParam := strings.Join(streams, "/")
-	wsURL := fmt.Sprintf("%s/stream?streams=%s", c.config.WebSocketURL, streamParam)
+	wsBaseURL := c.config.WebSocketURL
+	if len(symbols) == 1 {
+		wsBaseURL = c.websocketBaseURL(symbols[0])
+	}
+	wsURL := fmt.Sprintf("%s/stream?streams=%s", strings.TrimRight(wsBaseURL, "/"), streamParam)
 
 	dialer := websocket.Dialer{
 		HandshakeTimeout: 10 * time.Second,
