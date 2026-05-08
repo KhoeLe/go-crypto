@@ -8,6 +8,7 @@ set -e
 # Configuration
 FUNCTION_NAME="${FUNCTION_NAME:-go-crypto-api-sg}"
 REGION="${AWS_REGION:-ap-southeast-1}"
+LAMBDA_ALIAS="${LAMBDA_ALIAS:-prod}"
 ROLE_NAME="lambda-execution-role"
 BUILD_DIR="build"
 LAMBDA_ZIP="lambda.zip"
@@ -16,6 +17,7 @@ echo "🚀 AWS Lambda Deployment: Go Crypto API"
 echo "========================================"
 echo "Function: $FUNCTION_NAME"
 echo "Region: $REGION"
+echo "Lambda alias: ${LAMBDA_ALIAS:-<none>}"
 echo "API Gateway stage path: /prod/api/v1"
 echo ""
 
@@ -78,14 +80,8 @@ ROLE_ARN="arn:aws:iam::$ACCOUNT_ID:role/$ROLE_NAME"
 
 echo "🔍 Checking if Lambda function exists..."
 if aws lambda get-function --function-name "$FUNCTION_NAME" --region "$REGION" > /dev/null 2>&1; then
-    echo "📝 Function exists, updating code..."
-    
-    # Update function code
-    aws lambda update-function-code \
-        --function-name "$FUNCTION_NAME" \
-        --zip-file "fileb://$BUILD_DIR/$LAMBDA_ZIP" \
-        --region "$REGION"
-    
+    echo "📝 Function exists, updating configuration..."
+
     # Update function configuration
     aws lambda update-function-configuration \
         --function-name "$FUNCTION_NAME" \
@@ -97,13 +93,24 @@ if aws lambda get-function --function-name "$FUNCTION_NAME" --region "$REGION" >
             "LOG_LEVEL":"info"
         }' \
         --region "$REGION"
-    
+
+    aws lambda wait function-updated --function-name "$FUNCTION_NAME" --region "$REGION"
+
+    echo "📝 Updating code and publishing a new Lambda version..."
+    deploy_output=$(aws lambda update-function-code \
+        --function-name "$FUNCTION_NAME" \
+        --zip-file "fileb://$BUILD_DIR/$LAMBDA_ZIP" \
+        --publish \
+        --region "$REGION")
+    published_version=$(echo "$deploy_output" | jq -r '.Version // empty')
+    aws lambda wait function-updated --function-name "$FUNCTION_NAME" --region "$REGION"
+
     echo "✅ Function updated successfully"
 else
     echo "🆕 Creating new Lambda function..."
     
     # Create function
-    aws lambda create-function \
+    deploy_output=$(aws lambda create-function \
         --function-name "$FUNCTION_NAME" \
         --runtime "provided.al2" \
         --role "$ROLE_ARN" \
@@ -116,14 +123,34 @@ else
             "API_TIMEOUT":"30",
             "LOG_LEVEL":"info"
         }' \
-        --region "$REGION"
+        --publish \
+        --region "$REGION")
+    published_version=$(echo "$deploy_output" | jq -r '.Version // empty')
+    aws lambda wait function-active --function-name "$FUNCTION_NAME" --region "$REGION"
     
     echo "✅ Function created successfully"
 fi
 
-# Wait for deployment to complete
-echo "⏳ Waiting for deployment to complete..."
-sleep 5
+echo "Published version: ${published_version:-unknown}"
+
+QUALIFIER_ARGS=()
+if [ -n "$LAMBDA_ALIAS" ] && [ -n "$published_version" ]; then
+    echo "🔁 Moving alias '$LAMBDA_ALIAS' to version $published_version..."
+    if aws lambda get-alias --function-name "$FUNCTION_NAME" --name "$LAMBDA_ALIAS" --region "$REGION" > /dev/null 2>&1; then
+        aws lambda update-alias \
+            --function-name "$FUNCTION_NAME" \
+            --name "$LAMBDA_ALIAS" \
+            --function-version "$published_version" \
+            --region "$REGION" > /dev/null
+    else
+        aws lambda create-alias \
+            --function-name "$FUNCTION_NAME" \
+            --name "$LAMBDA_ALIAS" \
+            --function-version "$published_version" \
+            --region "$REGION" > /dev/null
+    fi
+    QUALIFIER_ARGS=(--qualifier "$LAMBDA_ALIAS")
+fi
 
 # Test the deployment
 echo "🧪 Testing deployment..."
@@ -132,7 +159,9 @@ echo "🧪 Testing deployment..."
 echo "Testing health endpoint..."
 aws lambda invoke \
     --function-name "$FUNCTION_NAME" \
+    "${QUALIFIER_ARGS[@]}" \
     --payload '{"httpMethod":"GET","path":"/prod/api/v1/health"}' \
+    --cli-binary-format raw-in-base64-out \
     --region "$REGION" \
     response.json > /dev/null
 
@@ -151,7 +180,9 @@ fi
 echo "Testing XAU futures price endpoint..."
 aws lambda invoke \
     --function-name "$FUNCTION_NAME" \
+    "${QUALIFIER_ARGS[@]}" \
     --payload '{"httpMethod":"GET","path":"/prod/api/v1/price/XAUUSDT"}' \
+    --cli-binary-format raw-in-base64-out \
     --region "$REGION" \
     response.json > /dev/null
 

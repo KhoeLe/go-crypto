@@ -8,6 +8,7 @@ set -e
 # Configuration
 FUNCTION_NAME="${FUNCTION_NAME:-go-crypto-api-sg}"
 REGION="${AWS_REGION:-ap-southeast-1}"
+LAMBDA_ALIAS="${LAMBDA_ALIAS:-prod}"
 API_PREFIX="/prod/api/v1"
 
 # Colors for output
@@ -22,6 +23,8 @@ PASSED=0
 FAILED=0
 
 echo -e "${BLUE}🧪 Testing Lambda Function: $FUNCTION_NAME${NC}"
+echo -e "${BLUE}Region: $REGION${NC}"
+echo -e "${BLUE}Alias: ${LAMBDA_ALIAS:-<none>}${NC}"
 echo "================================================"
 
 # Function to test endpoint
@@ -36,7 +39,9 @@ test_endpoint() {
     # Invoke Lambda function
     if aws lambda invoke \
         --function-name "$FUNCTION_NAME" \
+        "${QUALIFIER_ARGS[@]}" \
         --payload "$payload" \
+        --cli-binary-format raw-in-base64-out \
         --region "$REGION" \
         response.json > invoke_output.txt 2>&1; then
         
@@ -78,6 +83,14 @@ if ! aws lambda get-function --function-name "$FUNCTION_NAME" --region "$REGION"
 fi
 
 echo -e "${GREEN}✅ Lambda function found${NC}"
+
+QUALIFIER_ARGS=()
+if [ -n "$LAMBDA_ALIAS" ] && aws lambda get-alias --function-name "$FUNCTION_NAME" --name "$LAMBDA_ALIAS" --region "$REGION" > /dev/null 2>&1; then
+    QUALIFIER_ARGS=(--qualifier "$LAMBDA_ALIAS")
+    echo -e "${GREEN}✅ Testing alias '$LAMBDA_ALIAS'${NC}"
+else
+    echo -e "${YELLOW}⚠ Lambda alias '$LAMBDA_ALIAS' not found; testing unqualified function${NC}"
+fi
 
 # Test cases based on command line argument
 if [ "$1" = "health" ] || [ "$1" = "all" ]; then

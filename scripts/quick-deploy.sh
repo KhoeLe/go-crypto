@@ -8,11 +8,15 @@ set -e
 # Configuration
 FUNCTION_NAME="${FUNCTION_NAME:-go-crypto-api-sg}"
 REGION="${AWS_REGION:-ap-southeast-1}"
+LAMBDA_ALIAS="${LAMBDA_ALIAS:-prod}"
 BUILD_DIR="build"
 LAMBDA_ZIP="lambda.zip"
 
 echo "🚀 Quick Deploy: Go Crypto API Lambda Function"
 echo "=============================================="
+echo "Function: $FUNCTION_NAME"
+echo "Region: $REGION"
+echo "Lambda alias: ${LAMBDA_ALIAS:-<none>}"
 echo "API Gateway stage path: /prod/api/v1"
 
 # Check if AWS CLI is configured
@@ -38,18 +42,39 @@ make package-lambda
 
 # Deploy to existing function
 echo "🚀 Updating Lambda function code..."
-aws lambda update-function-code \
+deploy_output=$(aws lambda update-function-code \
     --function-name "$FUNCTION_NAME" \
     --zip-file "fileb://$BUILD_DIR/$LAMBDA_ZIP" \
-    --region "$REGION"
+    --publish \
+    --region "$REGION")
+published_version=$(echo "$deploy_output" | jq -r '.Version // empty')
 
 if [ $? -eq 0 ]; then
     echo "✅ Lambda function updated successfully!"
-    
-    # Wait a moment for deployment to complete
+
     echo "⏳ Waiting for deployment to complete..."
-    sleep 5
-    
+    aws lambda wait function-updated --function-name "$FUNCTION_NAME" --region "$REGION"
+    echo "Published version: ${published_version:-unknown}"
+
+    QUALIFIER_ARGS=()
+    if [ -n "$LAMBDA_ALIAS" ] && [ -n "$published_version" ]; then
+        echo "🔁 Moving alias '$LAMBDA_ALIAS' to version $published_version..."
+        if aws lambda get-alias --function-name "$FUNCTION_NAME" --name "$LAMBDA_ALIAS" --region "$REGION" > /dev/null 2>&1; then
+            aws lambda update-alias \
+                --function-name "$FUNCTION_NAME" \
+                --name "$LAMBDA_ALIAS" \
+                --function-version "$published_version" \
+                --region "$REGION" > /dev/null
+        else
+            aws lambda create-alias \
+                --function-name "$FUNCTION_NAME" \
+                --name "$LAMBDA_ALIAS" \
+                --function-version "$published_version" \
+                --region "$REGION" > /dev/null
+        fi
+        QUALIFIER_ARGS=(--qualifier "$LAMBDA_ALIAS")
+    fi
+
     # Test the deployment
     echo "🧪 Testing deployment..."
     
@@ -57,7 +82,9 @@ if [ $? -eq 0 ]; then
     echo "Testing health endpoint..."
     aws lambda invoke \
         --function-name "$FUNCTION_NAME" \
+        "${QUALIFIER_ARGS[@]}" \
         --payload '{"httpMethod":"GET","path":"/prod/api/v1/health"}' \
+        --cli-binary-format raw-in-base64-out \
         --region "$REGION" \
         response.json > /dev/null
     
@@ -75,7 +102,9 @@ if [ $? -eq 0 ]; then
     echo "Testing XAU futures analysis endpoint..."
     aws lambda invoke \
         --function-name "$FUNCTION_NAME" \
+        "${QUALIFIER_ARGS[@]}" \
         --payload '{"httpMethod":"GET","path":"/prod/api/v1/analysis/XAUUSDT","queryStringParameters":{"interval":"1h"}}' \
+        --cli-binary-format raw-in-base64-out \
         --region "$REGION" \
         response.json > /dev/null
 

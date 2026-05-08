@@ -119,7 +119,7 @@ build-lambda: deps ## Build Lambda function for AWS
 
 package-lambda: build-lambda ## Package Lambda function for deployment
 	@echo "Packaging Lambda function..."
-	cd $(BUILD_DIR) && zip $(LAMBDA_ZIP) bootstrap
+	cd $(BUILD_DIR) && rm -f $(LAMBDA_ZIP) && zip -q $(LAMBDA_ZIP) bootstrap
 
 deploy-lambda: package-lambda ## Deploy Lambda function to AWS
 	@echo "Deploying Lambda function to AWS..."
