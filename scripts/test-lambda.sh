@@ -6,8 +6,8 @@
 set -e
 
 # Configuration
-FUNCTION_NAME="go-crypto-api-sg"
-REGION="ap-southeast-1"
+FUNCTION_NAME="${FUNCTION_NAME:-go-crypto-api-sg}"
+REGION="${AWS_REGION:-ap-southeast-1}"
 API_PREFIX="/prod/api/v1"
 
 # Colors for output

@@ -6,8 +6,8 @@
 set -e
 
 # Configuration
-FUNCTION_NAME="go-crypto-api-sg"
-REGION="ap-southeast-1"
+FUNCTION_NAME="${FUNCTION_NAME:-go-crypto-api-sg}"
+REGION="${AWS_REGION:-ap-southeast-1}"
 ROLE_NAME="lambda-execution-role"
 BUILD_DIR="build"
 LAMBDA_ZIP="lambda.zip"

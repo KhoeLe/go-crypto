@@ -141,7 +141,7 @@ lambda-invoke: package-lambda ## Invoke Lambda function directly
 	@echo "Invoking Lambda function..."
 	aws lambda invoke \
 		--function-name $(LAMBDA_FUNCTION_NAME) \
-		--payload '{"httpMethod":"GET","path":"/health"}' \
+		--payload '{"httpMethod":"GET","path":"/prod/api/v1/health"}' \
 		--region $(AWS_REGION) \
 		response.json
 	@cat response.json
