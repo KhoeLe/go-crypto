@@ -81,6 +81,19 @@ type MACDIndicator struct {
 	Histogram decimal.Decimal `json:"histogram"` // MACD - Signal
 }
 
+// TradeSetup is a conservative trade-quality gate for discretionary systems.
+type TradeSetup struct {
+	Action        string          `json:"action"`        // LONG, SHORT, LONG_WATCH, SHORT_WATCH, WAIT
+	Direction     string          `json:"direction"`     // bullish, bearish, neutral
+	QualityScore  decimal.Decimal `json:"quality_score"` // 0-100 quality score
+	Confidence    decimal.Decimal `json:"confidence"`    // 0-100 trend confidence
+	RiskLevel     string          `json:"risk_level"`    // low, medium, high
+	VolatilityPct decimal.Decimal `json:"volatility_pct"`
+	Reasons       []string        `json:"reasons"`
+	Warnings      []string        `json:"warnings"`
+	Blockers      []string        `json:"blockers"`
+}
+
 // MarketData represents comprehensive market data
 type MarketData struct {
 	Symbol     Symbol              `json:"symbol"`
@@ -214,6 +227,7 @@ type EnhancedAnalysisResponse struct {
 	MACD            MACDIndicator              `json:"macd"`
 	Volatility      decimal.Decimal            `json:"volatility"`
 	MarketSentiment string                     `json:"market_sentiment"`
+	TradeSetup      TradeSetup                 `json:"trade_setup"`
 	MoneyFlow       MoneyFlowIndicator         `json:"money_flow"`      // Money flow analysis
 	VolumeBreakout  VolumeBreakout             `json:"volume_breakout"` // Volume breakout detection
 	VolumeDelta     VolumeDelta                `json:"volume_delta"`    // Buy vs sell pressure analysis

@@ -178,6 +178,7 @@ type AnalysisResponse struct {
 	Trend           string                     `json:"trend"`
 	TrendConfidence decimal.Decimal            `json:"trend_confidence"`
 	MarketSentiment string                     `json:"market_sentiment"`
+	TradeSetup      models.TradeSetup          `json:"trade_setup"`
 	Signals         []string                   `json:"signals"`
 	Timestamp       models.GMTPlus7Time        `json:"timestamp"`
 }
@@ -622,9 +623,11 @@ func (s *Server) handleGetSignals(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.sendSuccess(w, map[string]interface{}{
-		"symbol":    string(symbol),
-		"signals":   analysis.Signals,
-		"timestamp": nowGMT7(),
+		"symbol":      string(symbol),
+		"timeframe":   analysis.Timeframe,
+		"signals":     analysis.Signals,
+		"trade_setup": analysis.TradeSetup,
+		"timestamp":   nowGMT7(),
 	})
 }
 
@@ -795,6 +798,7 @@ func (s *Server) getSymbolAnalysis(ctx context.Context, symbol models.Symbol, ti
 	// Generate signals
 	signals := s.generateSignals(ticker, rsiValues, maValues, kdj)
 	signals = append(signals, s.trendSignals(trend, trendConfidence)...)
+	tradeSetup := s.buildTradeSetup(ticker, rsiValues, maValues, kdj, macd, volatility, trend, trendConfidence)
 
 	return &AnalysisResponse{
 		Symbol:          string(symbol),
@@ -808,6 +812,7 @@ func (s *Server) getSymbolAnalysis(ctx context.Context, symbol models.Symbol, ti
 		Trend:           trend,
 		TrendConfidence: trendConfidence,
 		MarketSentiment: marketSentiment,
+		TradeSetup:      tradeSetup,
 		Signals:         signals,
 		Timestamp:       nowGMT7(),
 	}, nil
@@ -988,6 +993,7 @@ func (s *Server) getEnhancedSymbolAnalysis(ctx context.Context, symbol models.Sy
 	signals := s.generateEnhancedSignals(ticker, rsiValues, maValues, kdj, moneyFlow, volumeBreakout, volumeDelta, whaleActivity)
 	trend, trendConfidence := s.deriveTrend(ticker.Price, maValues)
 	signals = append(signals, s.trendSignals(trend, trendConfidence)...)
+	tradeSetup := s.buildTradeSetup(ticker, rsiValues, maValues, kdj, macd, volatility, trend, trendConfidence)
 
 	// Return only the last 15 klines in the response (but use all 50 for calculations)
 	responseKlines := klines
@@ -1006,6 +1012,7 @@ func (s *Server) getEnhancedSymbolAnalysis(ctx context.Context, symbol models.Sy
 		MACD:            macd,
 		Volatility:      volatility,
 		MarketSentiment: marketSentiment,
+		TradeSetup:      tradeSetup,
 		MoneyFlow:       moneyFlow,
 		VolumeBreakout:  volumeBreakout,
 		VolumeDelta:     volumeDelta,   // New: Buy vs sell pressure analysis
@@ -1176,6 +1183,214 @@ func (s *Server) trendSignals(trend string, confidence decimal.Decimal) []string
 	default:
 		return nil
 	}
+}
+
+func (s *Server) buildTradeSetup(
+	ticker *models.TickerPrice,
+	rsiValues map[string]decimal.Decimal,
+	maValues map[string]decimal.Decimal,
+	kdj models.KDJIndicator,
+	macd models.MACDIndicator,
+	volatility decimal.Decimal,
+	trend string,
+	trendConfidence decimal.Decimal,
+) models.TradeSetup {
+	direction := "neutral"
+	actionPrefix := "WAIT"
+	reasons := make([]string, 0)
+	warnings := make([]string, 0)
+	blockers := make([]string, 0)
+	score := decimal.Zero
+
+	switch trend {
+	case "bullish":
+		direction = "bullish"
+		actionPrefix = "LONG"
+		score = score.Add(trendConfidence.Mul(decimal.NewFromFloat(0.35)))
+		reasons = append(reasons, fmt.Sprintf("trend bullish with %s%% confidence", trendConfidence.StringFixed(2)))
+	case "bearish":
+		direction = "bearish"
+		actionPrefix = "SHORT"
+		score = score.Add(trendConfidence.Mul(decimal.NewFromFloat(0.35)))
+		reasons = append(reasons, fmt.Sprintf("trend bearish with %s%% confidence", trendConfidence.StringFixed(2)))
+	default:
+		blockers = append(blockers, fmt.Sprintf("trend is %s, waiting for direction", trend))
+	}
+
+	maAligned, maAvailable := s.countMAAlignment(ticker.Price, maValues, direction)
+	if direction != "neutral" {
+		if maAvailable >= 3 {
+			maScore := decimal.NewFromInt(int64(maAligned)).
+				Div(decimal.NewFromInt(int64(maAvailable))).
+				Mul(decimal.NewFromInt(25))
+			score = score.Add(maScore)
+			reasons = append(reasons, fmt.Sprintf("MA confluence %d/%d", maAligned, maAvailable))
+			if maAligned < 3 {
+				blockers = append(blockers, fmt.Sprintf("MA confluence below 3/%d", maAvailable))
+			}
+		} else {
+			blockers = append(blockers, "not enough MA context")
+		}
+	}
+
+	if direction == "bullish" {
+		if macd.Histogram.GreaterThan(decimal.Zero) && macd.MACD.GreaterThan(macd.Signal) {
+			score = score.Add(decimal.NewFromInt(15))
+			reasons = append(reasons, "MACD momentum confirms long")
+		} else {
+			blockers = append(blockers, "MACD momentum does not confirm long")
+		}
+	} else if direction == "bearish" {
+		if macd.Histogram.LessThan(decimal.Zero) && macd.MACD.LessThan(macd.Signal) {
+			score = score.Add(decimal.NewFromInt(15))
+			reasons = append(reasons, "MACD momentum confirms short")
+		} else {
+			blockers = append(blockers, "MACD momentum does not confirm short")
+		}
+	}
+
+	primaryRSI, hasRSI := primaryRSIValue(rsiValues)
+	if hasRSI {
+		switch direction {
+		case "bullish":
+			switch {
+			case primaryRSI.GreaterThanOrEqual(decimal.NewFromInt(45)) && primaryRSI.LessThanOrEqual(decimal.NewFromInt(70)):
+				score = score.Add(decimal.NewFromInt(12))
+				reasons = append(reasons, "RSI supports long without overextension")
+			case primaryRSI.GreaterThan(decimal.NewFromInt(78)):
+				score = score.Sub(decimal.NewFromInt(10))
+				blockers = append(blockers, "RSI overbought, avoid chasing long")
+			case primaryRSI.LessThan(decimal.NewFromInt(40)):
+				blockers = append(blockers, "RSI too weak for long")
+			default:
+				score = score.Add(decimal.NewFromInt(4))
+				reasons = append(reasons, "RSI acceptable for long watch")
+			}
+		case "bearish":
+			switch {
+			case primaryRSI.GreaterThanOrEqual(decimal.NewFromInt(30)) && primaryRSI.LessThanOrEqual(decimal.NewFromInt(55)):
+				score = score.Add(decimal.NewFromInt(12))
+				reasons = append(reasons, "RSI supports short without overextension")
+			case primaryRSI.LessThan(decimal.NewFromInt(22)):
+				score = score.Sub(decimal.NewFromInt(10))
+				blockers = append(blockers, "RSI oversold, avoid chasing short")
+			case primaryRSI.GreaterThan(decimal.NewFromInt(60)):
+				blockers = append(blockers, "RSI too strong for short")
+			default:
+				score = score.Add(decimal.NewFromInt(4))
+				reasons = append(reasons, "RSI acceptable for short watch")
+			}
+		}
+	}
+
+	if direction == "bullish" {
+		if kdj.K.GreaterThan(kdj.D) {
+			score = score.Add(decimal.NewFromInt(6))
+			reasons = append(reasons, "KDJ points upward")
+		}
+		if kdj.J.LessThan(decimal.NewFromInt(90)) {
+			score = score.Add(decimal.NewFromInt(2))
+		} else {
+			blockers = append(blockers, "KDJ overextended for long")
+		}
+	} else if direction == "bearish" {
+		if kdj.K.LessThan(kdj.D) {
+			score = score.Add(decimal.NewFromInt(6))
+			reasons = append(reasons, "KDJ points downward")
+		}
+		if kdj.J.GreaterThan(decimal.NewFromInt(10)) {
+			score = score.Add(decimal.NewFromInt(2))
+		} else {
+			blockers = append(blockers, "KDJ overextended for short")
+		}
+	}
+
+	if direction == "bullish" && ticker.PriceChangePercent.GreaterThan(decimal.Zero) {
+		score = score.Add(decimal.NewFromInt(5))
+		reasons = append(reasons, "24h momentum supports long")
+	} else if direction == "bearish" && ticker.PriceChangePercent.LessThan(decimal.Zero) {
+		score = score.Add(decimal.NewFromInt(5))
+		reasons = append(reasons, "24h momentum supports short")
+	} else if direction != "neutral" {
+		warnings = append(warnings, "24h momentum is against setup")
+	}
+
+	volatilityPct := decimal.Zero
+	riskLevel := "unknown"
+	if ticker.Price.GreaterThan(decimal.Zero) {
+		volatilityPct = volatility.Div(ticker.Price).Mul(decimal.NewFromInt(100)).Round(4)
+		switch {
+		case volatilityPct.GreaterThan(decimal.NewFromFloat(1.5)):
+			riskLevel = "high"
+			score = score.Sub(decimal.NewFromInt(10))
+			blockers = append(blockers, "volatility elevated, reduce or skip")
+		case volatilityPct.GreaterThan(decimal.NewFromFloat(0.8)):
+			riskLevel = "medium"
+			score = score.Sub(decimal.NewFromInt(4))
+			warnings = append(warnings, "volatility medium, size conservatively")
+		default:
+			riskLevel = "low"
+			score = score.Add(decimal.NewFromInt(4))
+		}
+	}
+
+	score = clampDecimal(score, decimal.Zero, decimal.NewFromInt(100)).Round(1)
+	action := "WAIT"
+	if direction != "neutral" && score.GreaterThanOrEqual(decimal.NewFromInt(75)) && len(blockers) <= 1 {
+		action = actionPrefix
+	} else if direction != "neutral" && score.GreaterThanOrEqual(decimal.NewFromInt(60)) {
+		action = actionPrefix + "_WATCH"
+	}
+
+	return models.TradeSetup{
+		Action:        action,
+		Direction:     direction,
+		QualityScore:  score,
+		Confidence:    trendConfidence.Round(2),
+		RiskLevel:     riskLevel,
+		VolatilityPct: volatilityPct,
+		Reasons:       reasons,
+		Warnings:      warnings,
+		Blockers:      blockers,
+	}
+}
+
+func (s *Server) countMAAlignment(price decimal.Decimal, maValues map[string]decimal.Decimal, direction string) (int, int) {
+	aligned := 0
+	available := 0
+	for _, period := range []int{20, 50, 99, 200} {
+		ma, exists := maValues[maKey(period)]
+		if !exists || ma.IsZero() {
+			continue
+		}
+		available++
+		if direction == "bullish" && price.GreaterThan(ma) {
+			aligned++
+		}
+		if direction == "bearish" && price.LessThan(ma) {
+			aligned++
+		}
+	}
+	return aligned, available
+}
+
+func primaryRSIValue(rsiValues map[string]decimal.Decimal) (decimal.Decimal, bool) {
+	for _, key := range []string{"RSI_12", "RSI_24", "RSI_6"} {
+		if value, exists := rsiValues[key]; exists {
+			return value, true
+		}
+	}
+	return decimal.Zero, false
+}
+
+func clampDecimal(value, low, high decimal.Decimal) decimal.Decimal {
+	if value.LessThan(low) {
+		return low
+	}
+	if value.GreaterThan(high) {
+		return high
+	}
+	return value
 }
 
 // generateSignals creates basic trading signals (traditional method)
