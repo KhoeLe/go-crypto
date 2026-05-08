@@ -650,6 +650,20 @@ func (s *Server) handleGetSymbols(w http.ResponseWriter, r *http.Request) {
 		"symbols":         s.config.Symbols,
 		"futures_symbols": s.config.Binance.FuturesSymbols,
 		"intervals":       s.config.Intervals,
+		"indicators": map[string]interface{}{
+			"rsi": map[string]interface{}{
+				"periods": s.config.Indicators.RSI.Periods,
+			},
+			"ma": map[string]interface{}{
+				"periods": s.config.Indicators.MA.Periods,
+				"type":    s.config.Indicators.MA.Type,
+			},
+			"kdj": map[string]interface{}{
+				"k_period": s.config.Indicators.KDJ.KPeriod,
+				"d_period": s.config.Indicators.KDJ.DPeriod,
+				"j_period": s.config.Indicators.KDJ.JPeriod,
+			},
+		},
 		"market_notes": map[string]string{
 			"XAUTUSDT": "spot tokenized gold proxy",
 			"XAUUSDT":  "USD-M futures gold contract",
